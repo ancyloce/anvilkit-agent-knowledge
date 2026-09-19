@@ -1,0 +1,39 @@
+{
+  "name": "@anvilkit/agent-knowledge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Knowledge service of the AnvilKit Agent platform (DD-07, DD-09, delivery.md P14): in this build the owner of anvilkit.knowledge.v1.BackgroundTaskService over the durable background_requests tables, the transactional outbox written on the same pg client transaction as every domain fact (the physical schema of the pinned watermill-sql adapter, forwarded by the Go sidecar under forwarder/), the lease sweeper, cancellation and the immutable configuration generations. Sources, ingestion, retrieval and MemoryFact arrive with P15-P17.",
+  "type": "module",
+  "packageManager": "pnpm@12.3.4",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "tsc --noEmit -p tsconfig.json && node build.mjs",
+    "check-types": "tsc --noEmit -p tsconfig.json",
+    "lint": "biome check src test build.mjs",
+    "test": "vitest run",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@anvilkit/generated-clients": "github:ancyloce/anvilkit-agent-contracts#ffe05d5511bd646b8b6ae483616c3a9d26373404&path:ts",
+    "@bufbuild/protobuf": "2.15.0",
+    "@bufbuild/protovalidate": "1.2.0",
+    "@grpc/grpc-js": "1.14.4",
+    "grpc-health-check": "2.1.0",
+    "jsonc-parser": "3.3.1",
+    "lossless-json": "4.3.1",
+    "pg": "8.23.0",
+    "prom-client": "15.1.3",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@testcontainers/postgresql": "12.1.0",
+    "@types/node": "24.13.5",
+    "@types/pg": "8.23.1",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3",
+    "vitest": "5.0.1"
+  }
+}

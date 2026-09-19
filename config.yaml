@@ -1,0 +1,43 @@
+# Reviewed configuration of anvilkit-agent-knowledge (DD-09 §4): the
+# secret-free, placement-free part of a configuration generation. Precedence
+# is defaults < this file < a validated Apollo snapshot (non-secret keys,
+# ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE with apollo.mode: snapshot) < the
+# allowlisted environment: ANVILKIT_KNOWLEDGE_LISTEN,
+# ANVILKIT_KNOWLEDGE_HEALTH_LISTEN, ANVILKIT_KNOWLEDGE_DATABASE_URL or
+# ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE (the secret, environment or mounted
+# file only), ANVILKIT_KNOWLEDGE_CONTROL_ADDRESS,
+# ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE. Any other ANVILKIT_KNOWLEDGE_*
+# variable, any unknown key here and any secret or placement key here
+# rejects the candidate before anything starts.
+#
+# P14 scope: the BackgroundTaskService owner (claims, heartbeats, result
+# acceptance, lease sweep, cancellation) and the transactional outbox; the
+# Go forwarder sidecar (forwarder/) reads it. Sources, ingestion, retrieval
+# and MemoryFact arrive with P15-P17. DEVELOPMENT_ONLY bounds below are not
+# production capacity.
+grpc:
+  listen: 127.0.0.1:9105
+  capacity: 64
+  shutdown_timeout: 20s
+health:
+  listen: 127.0.0.1:9115
+database:
+  max_conn: 8
+tasks:
+  max_input_bytes: 65536
+  max_lease: 10m
+  retry_delay: 5s
+  max_attempts: 3
+  sweep_interval: 2s
+outbox:
+  # The forwarder sidecar's consumer group: the offsets row it owns; the
+  # oldest-unforwarded metric of this service reads that row.
+  consumer_group: anvilkit-agent-knowledge-forwarder
+control:
+  timeout: 5s
+apollo:
+  mode: disabled
+  app_id: anvilkit-agent-knowledge
+reload:
+  interval: 2s
+  drain_limit: 30s

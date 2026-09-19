@@ -1,0 +1,18 @@
+# This directory is its own pnpm workspace root (one package), independent of
+# the parent's workspace globs, as contracts/ and services/agent/model-proxy
+# are: the lockfile here pins the service's toolchain and the exact contracts
+# commit it consumes (@anvilkit/generated-clients as a git-hosted dependency
+# of the contracts repository, resolved by commit hash and content integrity).
+packages: []
+# No lifecycle script runs in this install: esbuild's postinstall only fetches
+# a platform binary when its optional platform package is absent; protobufjs
+# (transitive of @grpc/grpc-js) only prints a notice; ssh2 and cpu-features
+# (transitive of the testcontainers dev dependency) build optional native
+# bindings this package never uses.
+allowBuilds:
+  cpu-features: false
+  esbuild: false
+  protobufjs: false
+  ssh2: false
+minimumReleaseAgeExclude:
+  - '@types/node@24.13.5'
