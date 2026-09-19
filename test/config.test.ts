@@ -1,0 +1,111 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+import { inputsOf, loadFrom, parseApolloSnapshot } from "../src/config.js";
+
+const base = { ANVILKIT_KNOWLEDGE_DATABASE_URL: "postgres://u:p@127.0.0.1:5432/anvilkit_knowledge" };
+
+function write(content: string): string {
+	const dir = mkdtempSync(path.join(tmpdir(), "knowledge-config-"));
+	const p = path.join(dir, "config.yaml");
+	writeFileSync(p, content);
+	return p;
+}
+
+describe("configuration generations", () => {
+	it("loads the reviewed file and never carries the secret in a digest", () => {
+		const g = loadFrom(path.resolve("config.yaml"), base, 1);
+		expect(g.config.tasks.maxAttempts).toBe(3);
+		expect(g.digest).toMatch(/^sha256:/);
+		expect(inputsOf(g)).not.toContain("postgres://");
+	});
+
+	it("rejects unknown keys, secrets and placements in the file, unknown environment and cross-field conflicts", () => {
+		const cases: [string, NodeJS.ProcessEnv, RegExp][] = [
+			["grpc:\n  bogus: 1\n", base, /unknown key/],
+			["database:\n  url: postgres://x\n", base, /secret or a placement/],
+			["control:\n  address: x:1\n", base, /secret or a placement/],
+			["{}\n", { ...base, ANVILKIT_KNOWLEDGE_SURPRISE: "1" }, /not allowed overrides/],
+			["{}\n", {}, /database.url is required/],
+			["tasks:\n  max_lease: 1s\n  sweep_interval: 2s\n", base, /shorter than tasks.max_lease/],
+			["tasks:\n  max_input_bytes: 70000\n", base, /max_input_bytes/],
+			["apollo:\n  mode: snapshot\n", base, /apollo.snapshot_file is required/],
+		];
+		for (const [file, env, want] of cases) expect(() => loadFrom(write(file), env, 1)).toThrow(want);
+	});
+
+	it("reads the secret file and a validated snapshot below the environment; rotation changes only the secret revision", () => {
+		const dir = mkdtempSync(path.join(tmpdir(), "knowledge-config-"));
+		const secret = path.join(dir, "database-url");
+		writeFileSync(secret, "postgres://u:one@127.0.0.1:5432/anvilkit_knowledge\n");
+		const now = new Date();
+		const snapshot = path.join(dir, "apollo.json");
+		const good = {
+			schemaVersion: 1,
+			appId: "anvilkit-agent-knowledge",
+			cluster: "default",
+			namespace: "application",
+			releaseKey: "20260917120000-0123456789ab",
+			fetchedAt: now.toISOString(),
+			expiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
+			configurations: { "tasks.max_attempts": "5" },
+		};
+		writeFileSync(snapshot, JSON.stringify(good));
+		const file = write("apollo:\n  mode: snapshot\n");
+		const env = { ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE: secret, ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE: snapshot };
+		const g1 = loadFrom(file, env, 1);
+		expect(g1.config.tasks.maxAttempts).toBe(5);
+		expect(g1.apolloRelease).toBe(good.releaseKey);
+		writeFileSync(secret, "postgres://u:two@127.0.0.1:5432/anvilkit_knowledge");
+		const g2 = loadFrom(file, env, 2);
+		expect(g2.digest).toBe(g1.digest);
+		expect(g2.secretRevision).not.toBe(g1.secretRevision);
+		const bad: Record<string, unknown> = {
+			expired: { ...good, expiresAt: new Date(now.getTime() - 60_000).toISOString() },
+			"wrong app": { ...good, appId: "anvilkit-agent-mcp" },
+			"secret key": { ...good, configurations: { "database.url": "postgres://x" } },
+			"unknown field": { ...good, extra: true },
+			"release key": { ...good, releaseKey: "release-1" },
+			"unknown config key": { ...good, configurations: { "tasks.bogus": "1" } },
+		};
+		for (const [name, content] of Object.entries(bad)) {
+			writeFileSync(snapshot, JSON.stringify(content));
+			expect(() => loadFrom(file, env, 3), name).toThrow();
+		}
+		expect(() => parseApolloSnapshot("not json", "anvilkit-agent-knowledge", now)).toThrow(/apollo snapshot/);
+	});
+});
+
+describe("shared snapshot fixtures", () => {
+	it("agrees with packages/profile-schemas/fixtures.json when the parent checkout is present", async () => {
+		const { existsSync, readFileSync } = await import("node:fs");
+		let d = process.cwd();
+		let file = "";
+		for (;;) {
+			const c = path.join(d, "packages", "profile-schemas", "fixtures.json");
+			if (existsSync(c)) {
+				file = c;
+				break;
+			}
+			const parent = path.dirname(d);
+			if (parent === d) break;
+			d = parent;
+		}
+		if (!file) return; // UNEXECUTED outside the parent checkout
+		const doc = JSON.parse(readFileSync(file, "utf8")) as {
+			now: string;
+			cases: { name: string; schema: string; appId?: string; valid: boolean; instance: unknown }[];
+		};
+		const now = new Date(doc.now);
+		for (const c of doc.cases.filter((x) => x.schema === "apollo-snapshot")) {
+			let ok = true;
+			try {
+				parseApolloSnapshot(JSON.stringify(c.instance), c.appId ?? "", now);
+			} catch {
+				ok = false;
+			}
+			expect(ok, c.name).toBe(c.valid);
+		}
+	});
+});
