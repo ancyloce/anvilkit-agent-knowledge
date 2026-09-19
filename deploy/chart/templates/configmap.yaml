@@ -1,0 +1,10 @@
+{{- include "anvilkit-agent-knowledge.require" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "anvilkit-agent-knowledge.fullname" . }}
+  labels:
+    {{- include "anvilkit-agent-knowledge.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- toYaml .Values.config | nindent 4 }}

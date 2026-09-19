@@ -1,0 +1,6 @@
+apiVersion: v2
+name: anvilkit-agent-knowledge
+description: The AnvilKit Agent Knowledge service (anvilkit-agent-knowledge) - the service's own chart with its outbox forwarder and owner queue relay sidecars; environment values and the pinned deployment combination belong to the deploying repository.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

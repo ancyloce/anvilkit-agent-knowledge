@@ -1,0 +1,165 @@
+# Chart values of anvilkit-agent-knowledge. Only what this service needs:
+# its image, its reviewed configuration file, the allowlisted placement
+# overrides, the Secrets it reads its credentials from, probes, resources
+# and its two sidecars of P14 — the Go outbox forwarder (the forwarder
+# target of this repository's image, run with the forwarder role: message
+# read and offset write only) and the owner queue relay (the
+# background-worker image's relay entry, run with the relay role). Environment
+# values are supplied by the deploying repository; secrets never enter this chart.
+
+image:
+  repository: anvilkit-agent-knowledge
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+
+listen:
+  address: 0.0.0.0
+  port: 9105
+health:
+  port: 9115
+
+# The application-role connection, mounted as a file
+# (ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE) so a rotated secret publishes a new
+# configuration generation without a restart. Required; never created here.
+database:
+  secret:
+    name: ""
+    key: url
+
+# The JetStream placement (forwarder and relay). Required.
+nats:
+  url: ""
+
+# The Control placement of the original-dispatch query; optional.
+control:
+  address: ""
+
+# The outbox forwarder sidecar: its own database identity
+# (anvilkit_knowledge_forwarder: SELECT on outbox, SELECT/INSERT/UPDATE on
+# outbox_offsets, nothing else), read from an existing Secret.
+forwarder:
+  enabled: true
+  image:
+    repository: anvilkit-knowledge-forwarder
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  database:
+    secret:
+      name: ""
+      key: url
+  healthPort: 9125
+  consumerGroup: anvilkit-agent-knowledge-forwarder
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
+
+# The owner queue relay sidecar (see the MCP chart for the same container).
+relay:
+  enabled: true
+  image:
+    repository: anvilkit-agent-background-worker
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  database:
+    secret:
+      name: ""
+      key: url
+  queue:
+    secret:
+      name: ""
+      key: url
+  healthPort: 9126
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+config:
+  grpc:
+    listen: 127.0.0.1:9105
+    capacity: 64
+    shutdown_timeout: 20s
+  health:
+    listen: 127.0.0.1:9115
+  database:
+    max_conn: 8
+  tasks:
+    max_input_bytes: 65536
+    max_lease: 10m
+    retry_delay: 5s
+    max_attempts: 3
+    sweep_interval: 2s
+  outbox:
+    consumer_group: anvilkit-agent-knowledge-forwarder
+  control:
+    timeout: 5s
+  apollo:
+    mode: disabled
+    app_id: anvilkit-agent-knowledge
+  reload:
+    interval: 2s
+    drain_limit: 30s
+
+service:
+  type: ClusterIP
+  port: 9105
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+probes:
+  startup:
+    periodSeconds: 2
+    failureThreshold: 30
+  readiness:
+    periodSeconds: 5
+    failureThreshold: 3
+  liveness:
+    periodSeconds: 10
+    failureThreshold: 3
+
+terminationGracePeriodSeconds: 90
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+podLabels: {}
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
