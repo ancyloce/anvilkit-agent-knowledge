@@ -1,0 +1,60 @@
+# Independent verification of anvilkit-agent-knowledge from this repository
+# alone: the TypeScript service type-checks, lints, builds and tests
+# (Docker-backed PostgreSQL 17 through Testcontainers; the anvilkit_knowledge
+# migrations still live in the parent repository's migration Job until
+# Knowledge owns them — the sparse checkout below supplies them read-only),
+# the Go forwarder sidecar builds, vets and tests (the Node rows of the built
+# package read by the pinned adapter into a real JetStream), the two images
+# from the repository root, and the chart's lint and render.
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+env:
+  ANVILKIT_KNOWLEDGE_MIGRATIONS_DIR: ${{ github.workspace }}/parent/jobs/migration/internal/migrate/sql/knowledge
+jobs:
+  service:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ancyloce/anvilkit-services
+          path: parent
+          sparse-checkout: jobs/migration/internal/migrate/sql/knowledge
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.19.0"
+      - run: npm install -g pnpm@12.3.4
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm run check-types
+      - run: pnpm run lint
+      - run: pnpm run build
+      - run: pnpm test
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.0"
+      - run: cd forwarder && GOWORK=off GOFLAGS=-mod=readonly go build ./... && go vet ./... && go test -count=1 ./...
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t anvilkit-agent-knowledge:ci .
+      - run: docker build --target forwarder -t anvilkit-knowledge-forwarder:ci .
+  chart:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: "v3.19.0"
+      - run: >-
+          helm lint deploy/chart --set database.secret.name=knowledge-database --set nats.url=nats://nats:4222
+          --set forwarder.database.secret.name=knowledge-forwarder-database
+          --set relay.database.secret.name=knowledge-relay-database --set relay.queue.secret.name=queue-valkey
+      - run: >-
+          helm template anvilkit-agent-knowledge deploy/chart --set database.secret.name=knowledge-database --set nats.url=nats://nats:4222
+          --set forwarder.database.secret.name=knowledge-forwarder-database
+          --set relay.database.secret.name=knowledge-relay-database --set relay.queue.secret.name=queue-valkey > /dev/null
