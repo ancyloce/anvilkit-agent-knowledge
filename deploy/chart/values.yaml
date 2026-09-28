@@ -43,6 +43,32 @@ nats:
 control:
   address: ""
 
+# P15: Knowledge's object store (the anvilkit-knowledge bucket, its own
+# user and bucket-limited policy): the in-cluster endpoint, the endpoint
+# parser Pods reach through presigned URLs (defaults to the first), and an
+# existing Secret holding a KEY=VALUE file with the ACCESS_KEY_ID and
+# SECRET_ACCESS_KEY lines. Empty endpoint: no source registration.
+objects:
+  endpoint: ""
+  stageEndpoint: ""
+  credentials:
+    secret:
+      name: ""
+      key: credentials
+
+# P15: the parser launcher. enabled renders the least Role and RoleBinding
+# in the parser namespace and mounts an expiring API token into the
+# knowledge container only; config.parser.profile names the reviewed
+# parser profile (contracts/jobs) and imageRegistry completes its image.
+parser:
+  enabled: false
+  namespace: anvilkit-parsing
+  imageRegistry: ""
+
+# P15: the Inference placement (anvilkit-agent-inference); optional.
+inference:
+  url: ""
+
 # The outbox forwarder sidecar: its own database identity
 # (anvilkit_knowledge_forwarder: SELECT on outbox, SELECT/INSERT/UPDATE on
 # outbox_offsets, nothing else), read from an existing Secret.
@@ -117,6 +143,28 @@ config:
   reload:
     interval: 2s
     drain_limit: 30s
+  objects:
+    bucket: anvilkit-knowledge
+    region: us-east-1
+  sources:
+    max_bytes: 33554432
+  parser:
+    profile: ""
+    namespace: anvilkit-parsing
+    node_pool: parsing
+    seccomp_profile: anvilkit/candidate.json
+    poll_interval: 1s
+    deadline_grace: 30s
+    presign_ttl: 15m
+    kube_timeout: 10s
+  inference:
+    timeout: 30s
+    max_batch: 32
+    embedding_profile: bge-m3-v1
+    embedding_revision: 5617a9f61b028005a4858fdac845db406aefb181
+    dimensions: 1024
+    rerank_profile: bge-reranker-v2-m3-v1
+    rerank_revision: 953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e
 
 service:
   type: ClusterIP

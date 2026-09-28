@@ -58,6 +58,25 @@ spec:
             - name: ANVILKIT_KNOWLEDGE_CONTROL_ADDRESS
               value: {{ .Values.control.address | quote }}
             {{- end }}
+            {{- if .Values.objects.endpoint }}
+            # P15: Knowledge's object store (its own user and bucket-limited
+            # policy; the credentials as a mounted KEY=VALUE file) and the
+            # endpoint parser Pods reach through their presigned URLs.
+            - name: ANVILKIT_KNOWLEDGE_OBJECTS_ENDPOINT
+              value: {{ .Values.objects.endpoint | quote }}
+            - name: ANVILKIT_KNOWLEDGE_OBJECTS_STAGE_ENDPOINT
+              value: {{ .Values.objects.stageEndpoint | default .Values.objects.endpoint | quote }}
+            - name: ANVILKIT_KNOWLEDGE_OBJECTS_CREDENTIALS_FILE
+              value: /var/run/secrets/anvilkit/objects/{{ .Values.objects.credentials.secret.key }}
+            {{- end }}
+            {{- if .Values.parser.enabled }}
+            - name: ANVILKIT_KNOWLEDGE_IMAGE_REGISTRY
+              value: {{ .Values.parser.imageRegistry | quote }}
+            {{- end }}
+            {{- if .Values.inference.url }}
+            - name: ANVILKIT_KNOWLEDGE_INFERENCE_URL
+              value: {{ .Values.inference.url | quote }}
+            {{- end }}
           ports:
             - name: grpc
               containerPort: {{ .Values.listen.port }}
@@ -92,6 +111,19 @@ spec:
             - name: database
               mountPath: /var/run/secrets/anvilkit/database
               readOnly: true
+            {{- if .Values.objects.endpoint }}
+            - name: objects
+              mountPath: /var/run/secrets/anvilkit/objects
+              readOnly: true
+            {{- end }}
+            {{- if .Values.parser.enabled }}
+            # The launcher's API credential: a projected, expiring token for
+            # this container only (the Pod's automount stays off, so the
+            # sidecars have none).
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+            {{- end }}
         {{- if .Values.forwarder.enabled }}
         - name: forwarder
           image: {{ include "anvilkit-agent-knowledge.forwarderImage" . | quote }}
@@ -185,6 +217,24 @@ spec:
         - name: database
           secret:
             secretName: {{ .Values.database.secret.name }}
+        {{- if .Values.objects.endpoint }}
+        - name: objects
+          secret:
+            secretName: {{ required "objects.credentials.secret.name is required with objects.endpoint" .Values.objects.credentials.secret.name }}
+        {{- end }}
+        {{- if .Values.parser.enabled }}
+        - name: kube-api-access
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+        {{- end }}
         {{- if .Values.forwarder.enabled }}
         - name: forwarder-database
           secret:

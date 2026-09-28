@@ -1,0 +1,38 @@
+{{- if .Values.parser.enabled }}
+# The Knowledge parser launcher's least privilege (DD-07 §2, SEC-09): in the
+# parser namespace only, create, read and delete Jobs and create and read
+# the per-launch stage Secret the Job owns. No pods, exec, list, watch,
+# patch or other resource; the admission policies of
+# deploy/policies/kyverno/anvilkit-parsing-*.yaml additionally bind every
+# Job to the fixed parser template.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "anvilkit-agent-knowledge.fullname" . }}-parser-launcher
+  namespace: {{ .Values.parser.namespace }}
+  labels:
+    {{- include "anvilkit-agent-knowledge.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "anvilkit-agent-knowledge.fullname" . }}-parser-launcher
+  namespace: {{ .Values.parser.namespace }}
+  labels:
+    {{- include "anvilkit-agent-knowledge.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "anvilkit-agent-knowledge.fullname" . }}-parser-launcher
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "anvilkit-agent-knowledge.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
