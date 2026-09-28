@@ -3,6 +3,7 @@
 // request and the clock. The same rules as the MCP owner (Go); the
 // application layer executes one decision inside one transaction.
 import { createHash } from "node:crypto";
+import { ingestProfile, parseIngestInput, SourceError } from "./source.js";
 
 export type TaskState =
 	| "pending"
@@ -168,9 +169,21 @@ export function newRequest(
 		throw new TaskError("INVALID_ARGUMENT", `effects ${String(p.effects)}`);
 	if (p.effects === "external" && !p.dispatchId)
 		throw new TaskError("INVALID_ARGUMENT", "an external-effect request names its Control dispatch");
-	if (p.profile !== localCheckProfile)
-		throw new TaskError("PROFILE_UNQUALIFIED", `result profile ${p.profile} has no acceptance rule in this build`);
-	parseLocalCheck(p.input);
+	if (p.profile === localCheckProfile) parseLocalCheck(p.input);
+	else if (p.profile === ingestProfile) {
+		if (p.kind !== "knowledge-ingest")
+			throw new TaskError("INVALID_ARGUMENT", `${ingestProfile} belongs to knowledge-ingest tasks`);
+		if (p.effects !== "reconstructible")
+			throw new TaskError("INVALID_ARGUMENT", "parsing is reconstructible computation");
+		try {
+			const input = parseIngestInput(p.input);
+			if (p.authorizationRef !== `source:${input.sourceId}`)
+				throw new TaskError("INVALID_ARGUMENT", "an ingest request is authorized by its own source");
+		} catch (err) {
+			if (err instanceof SourceError) throw new TaskError("INVALID_ARGUMENT", err.message);
+			throw err;
+		}
+	} else throw new TaskError("PROFILE_UNQUALIFIED", `result profile ${p.profile} has no acceptance rule in this build`);
 	return {
 		taskId: p.taskId,
 		generation: 1,
@@ -196,8 +209,14 @@ export function newRequest(
 	};
 }
 
-/** The result reference and digest the profile requires, recomputed from the frozen input. */
-export function expectedResult(t: Task): { ref: string; digest: string } {
+/** The result a profile requires: recomputed from the frozen input, or the owner's own verified record. */
+export interface ExpectedResult {
+	ref: string;
+	digest: string;
+}
+
+/** The result reference and digest of the local-check profile, recomputed from the frozen input. */
+export function expectedResult(t: Task): ExpectedResult {
 	if (t.resultProfile !== localCheckProfile) throw new TaskError("PROFILE_UNQUALIFIED", t.resultProfile);
 	const input = parseLocalCheck(t.input);
 	return { ref: `local-check:${t.taskId}:${t.generation}`, digest: digestOf(Buffer.from(input.bytes, "base64")) };
@@ -350,6 +369,7 @@ export function decideSubmit(
 	auth: Authorization,
 	now: Date,
 	bounds: Bounds,
+	recorded?: ExpectedResult,
 ): SubmitDecision {
 	if (!digestPattern.test(sub.inputDigest)) throw new TaskError("INVALID_ARGUMENT", "input digest");
 	if (t.state === "accepted") {
@@ -379,8 +399,11 @@ export function decideSubmit(
 	if (!sub.succeeded) return failAttempt(t, sub.failureCode || failure.handler, now, bounds);
 	if (!digestPattern.test(sub.resultDigest))
 		throw new TaskError("INVALID_ARGUMENT", "a succeeded result carries its digest");
-	const expected = expectedResult(t);
-	if (sub.resultRef !== expected.ref || sub.resultDigest !== expected.digest)
+	// Profiles whose result cannot be recomputed from the input (the parser's
+	// output) are compared with the owner's verified record of this attempt;
+	// without one the submission cannot match.
+	const expected = t.resultProfile === localCheckProfile ? expectedResult(t) : recorded;
+	if (!expected || sub.resultRef !== expected.ref || sub.resultDigest !== expected.digest)
 		return failAttempt(t, failure.profileMismatch, now, bounds);
 	return {
 		task: {

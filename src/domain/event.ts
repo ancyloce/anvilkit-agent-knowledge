@@ -7,16 +7,17 @@ export const producer = "anvilkit-agent-knowledge";
 export const subjects = {
 	backgroundRequested: "anvilkit.knowledge.background.requested",
 	backgroundCompleted: "anvilkit.knowledge.background.completed",
+	sourceAuthorizationRevoked: "anvilkit.knowledge.source.authorization-revoked",
 } as const;
 
 export interface Envelope {
 	eventId: string;
-	eventType: "background.requested" | "background.completed";
+	eventType: "background.requested" | "background.completed" | "source.authorization-revoked";
 	schemaVersion: 1;
 	producer: typeof producer;
 	subject: string;
 	tenantId: string;
-	aggregateType: "background_request";
+	aggregateType: "background_request" | "source";
 	aggregateId: string;
 	aggregateRevision: string;
 	occurredAt: string;
@@ -66,4 +67,30 @@ export function completedEvent(t: Task, now: Date): Envelope {
 	};
 	if (t.state === "accepted") payload.resultDigest = t.resultDigest;
 	return envelope(t, "background.completed", subjects.backgroundCompleted, now, payload);
+}
+
+/**
+ * A committed revocation (ACL entries removed or the source deleted): the
+ * invalidation consumers stop disclosing the source's content under the
+ * previous ACL. The payload carries identities and the ACL revision only.
+ */
+export function sourceRevokedEvent(
+	s: { sourceId: string; tenantId: string; aclRevision: number; revision: number },
+	correlationId: string,
+	now: Date,
+): Envelope {
+	return {
+		eventId: randomUUID(),
+		eventType: "source.authorization-revoked",
+		schemaVersion: 1,
+		producer,
+		subject: subjects.sourceAuthorizationRevoked,
+		tenantId: s.tenantId,
+		aggregateType: "source",
+		aggregateId: s.sourceId,
+		aggregateRevision: String(s.revision),
+		occurredAt: now.toISOString(),
+		correlationId,
+		payload: { kind: "source.authorization-revoked", sourceId: s.sourceId, aclRevision: String(s.aclRevision) },
+	};
 }
