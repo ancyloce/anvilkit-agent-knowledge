@@ -41,3 +41,32 @@ apollo:
 reload:
   interval: 2s
   drain_limit: 30s
+# P15: the Source Registry's bound, the parser launcher and the Inference
+# profile. Placements and secrets come from the environment only:
+# ANVILKIT_KNOWLEDGE_OBJECTS_{ENDPOINT,STAGE_ENDPOINT,ACCESS_KEY_ID,
+# SECRET_ACCESS_KEY,CREDENTIALS_FILE}, ANVILKIT_KNOWLEDGE_KUBECONFIG,
+# ANVILKIT_KNOWLEDGE_IMAGE_REGISTRY, ANVILKIT_KNOWLEDGE_INFERENCE_URL.
+# parser.profile names a reviewed parser profile of contracts/jobs; empty
+# disables registration and parsing.
+objects:
+  bucket: anvilkit-knowledge
+  region: us-east-1
+sources:
+  max_bytes: 33554432
+parser:
+  profile: ""
+  namespace: anvilkit-parsing
+  node_pool: parsing
+  seccomp_profile: anvilkit/candidate.json
+  poll_interval: 1s
+  deadline_grace: 30s
+  presign_ttl: 15m
+  kube_timeout: 10s
+inference:
+  timeout: 30s
+  max_batch: 32
+  embedding_profile: bge-m3-v1
+  embedding_revision: 5617a9f61b028005a4858fdac845db406aefb181
+  dimensions: 1024
+  rerank_profile: bge-reranker-v2-m3-v1
+  rerank_revision: 953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e
