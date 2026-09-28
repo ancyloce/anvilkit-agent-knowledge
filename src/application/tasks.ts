@@ -16,6 +16,7 @@ import {
 	decideExpire,
 	decideHeartbeat,
 	decideSubmit,
+	type ExpectedResult,
 	newRequest,
 	type Submission,
 	type SubmitDecision,
@@ -52,8 +53,30 @@ export interface RequestInput {
 	correlationId: string;
 }
 
+/**
+ * The owner's record of a result profile whose expected result is not a
+ * function of the input (the parser's verified output): prepare runs before
+ * the submitting transaction without locks; onAccepted and onEnded run
+ * inside the transaction that accepts or ends the generation.
+ */
+export interface ResultRecords {
+	prepare(task: Task, sub: Submission): Promise<PreparedResult | undefined>;
+	onAccepted(c: db.PoolClient, task: Task, prepared: PreparedResult): Promise<void>;
+	onEnded(c: db.PoolClient, task: Task): Promise<void>;
+}
+
+export interface PreparedResult {
+	expected: ExpectedResult;
+	payload: unknown;
+}
+
 export class Tasks {
 	private bounds: Bounds;
+	private records = new Map<string, ResultRecords>();
+	/** Registers the result records of one task kind (knowledge-ingest). */
+	setRecords(kind: Task["kind"], records: ResultRecords): void {
+		this.records.set(kind, records);
+	}
 	private expiresAt?: number;
 	setExpiry(expiry?: number): void {
 		this.expiresAt = expiry;
@@ -88,7 +111,19 @@ export class Tasks {
 	 * the previous one.
 	 */
 	async request(input: RequestInput): Promise<{ task: Task; existing: boolean }> {
-		const out = await this.store.inTx(async (c) => {
+		const out = await this.store.inTx((c) => this.requestIn(c, input));
+		this.log.info("background request committed", {
+			taskId: out.task.taskId,
+			generation: out.task.generation,
+			kind: out.task.kind,
+			existing: out.existing,
+		});
+		return out;
+	}
+
+	/** request inside the caller's transaction: the owning fact, the request and its event commit together. */
+	async requestIn(c: db.PoolClient, input: RequestInput): Promise<{ task: Task; existing: boolean }> {
+		{
 			this.admitConfiguration();
 			if (Buffer.byteLength(input.input) > this.bounds.maxInputBytes)
 				throw new TaskError(
@@ -119,14 +154,7 @@ export class Tasks {
 			await db.insertRequest(c, candidate);
 			await db.publishOutbox(c, requestedEvent(candidate, now));
 			return { task: candidate, existing: false };
-		});
-		this.log.info("background request committed", {
-			taskId: out.task.taskId,
-			generation: out.task.generation,
-			kind: out.task.kind,
-			existing: out.existing,
-		});
-		return out;
+		}
 	}
 
 	private async apply(c: db.PoolClient, task: Task, readRevision: number, now: Date, outcome: string): Promise<void> {
@@ -135,7 +163,19 @@ export class Tasks {
 			throw new TaskError("STALE_EXECUTION", `generation ${task.generation} of ${task.taskId} changed under the lock`);
 		if (outcome && task.attemptCount > 0)
 			await db.setAttemptOutcome(c, task.taskId, task.generation, task.attemptCount, outcome, now);
-		if (terminal(task.state)) await db.publishOutbox(c, completedEvent(task, now));
+		if (terminal(task.state)) {
+			if (task.state !== "accepted") await this.records.get(task.kind)?.onEnded(c, task);
+			await db.publishOutbox(c, completedEvent(task, now));
+		}
+	}
+
+	/** Cancels the latest generation of a task inside the caller's transaction (source deletion). */
+	async cancelIn(c: db.PoolClient, taskId: string): Promise<boolean> {
+		const latest = await db.getLatestRequest(c, taskId, true);
+		if (!latest) return false;
+		const d = decideCancel(latest);
+		if (d.changed) await this.apply(c, d.task, latest.revision, this.clock.now(), d.attemptOutcome);
+		return d.changed;
 	}
 
 	private static current(task: Task, attempts: Attempt[]): Attempt | undefined {
@@ -205,12 +245,23 @@ export class Tasks {
 	async submit(taskId: string, generation: number, sub: Submission): Promise<SubmitDecision> {
 		let decision: SubmitDecision;
 		try {
+			// A recorded profile's verified result is loaded before the
+			// transaction: no storage I/O while the generation is locked.
+			const before = await db.getRequest(this.store.pool, taskId, generation);
+			const records = before ? this.records.get(before.kind) : undefined;
+			const prepared =
+				before && records && sub.succeeded && before.state === "leased"
+					? await records.prepare(before, sub)
+					: undefined;
 			decision = await this.store.inTx(async (c) => {
 				const { task, attempts } = await this.locked(c, taskId, generation);
 				const auth = await db.sourceAuthorization(c, task.authorizationRef, task.tenantId);
 				const now = this.clock.now();
-				const d = decideSubmit(task, Tasks.current(task, attempts), sub, auth, now, this.bounds);
+				// The preparation binds the attempt it read; a newer claim invalidates it.
+				const recorded = prepared && before?.attemptCount === task.attemptCount ? prepared : undefined;
+				const d = decideSubmit(task, Tasks.current(task, attempts), sub, auth, now, this.bounds, recorded?.expected);
 				if (d.changed) await this.apply(c, d.task, task.revision, now, d.attemptOutcome);
+				if (d.accepted && !d.existing && recorded && records) await records.onAccepted(c, d.task, recorded);
 				return d;
 			});
 		} catch (err) {
