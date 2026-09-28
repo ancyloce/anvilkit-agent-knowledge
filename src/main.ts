@@ -8,6 +8,8 @@
 import { collectDefaultMetrics, Registry } from "prom-client";
 import { ControlDispatchQuery } from "./adapters/control.js";
 import { Store } from "./adapters/postgres.js";
+import { Ingest, planOf } from "./application/ingest.js";
+import { Sources } from "./application/sources.js";
 import { noDispatchQuery, systemClock, Tasks } from "./application/tasks.js";
 import { defaultConfigFile, envConfigFile, type Generation, load } from "./config.js";
 import { buildRuntime, Generations, retire } from "./generations.js";
@@ -60,9 +62,47 @@ export async function start(
 		metrics,
 	);
 	const gens = new Generations(environ[envConfigFile] || defaultConfigFile, environ, first, store, tasks, metrics, log);
+	const active = () => gens.current()?.config ?? cfg;
+	const sources = new Sources(
+		store,
+		tasks,
+		() => gens.runtime()?.objects,
+		() => {
+			const p = gens.runtime()?.parser;
+			return p ? planOf(p) : undefined;
+		},
+		() => ({ maxSourceBytes: active().sources.maxBytes }),
+		systemClock,
+		log,
+	);
+	const ingest = new Ingest(
+		store,
+		() => gens.runtime()?.kube,
+		() => gens.runtime()?.objects,
+		() => gens.runtime()?.parser,
+		() => {
+			const p = active().parser;
+			return {
+				namespace: p.namespace,
+				imageRegistry: p.imageRegistry,
+				nodePool: p.nodePool,
+				seccompProfile: p.seccompProfile,
+				stageSecret: "",
+				pollMs: p.pollMs,
+				deadlineGraceMs: p.deadlineGraceMs,
+				presignTtlSeconds: p.presignTtlSeconds,
+			};
+		},
+		systemClock,
+		log,
+		metrics,
+	);
+	tasks.setRecords("knowledge-ingest", ingest);
+	if (!cfg.parser.profile)
+		log.warn("no parser profile: sources are refused and ingest tasks fail (parser.profile unset)");
 	let ready = false;
 	const health = createHealthServer(registry, () => ready && tasks.ready());
-	const grpc = createGrpcServer(cfg.grpc.listen, cfg.grpc.capacity, tasks, log);
+	const grpc = createGrpcServer(cfg.grpc.listen, cfg.grpc.capacity, tasks, log, sources, ingest);
 	let sweeper: NodeJS.Timeout | undefined;
 	let watcher: NodeJS.Timeout | undefined;
 	let sweeping: Promise<void> = Promise.resolve();
@@ -105,6 +145,8 @@ export async function start(
 		healthListen: cfg.health.listen,
 		generation: first.number,
 		control: cfg.control.address || "(none)",
+		parserProfile: cfg.parser.profile || "(none)",
+		parserNamespace: cfg.parser.namespace,
 	});
 	let resolveDone!: () => void;
 	const done = new Promise<void>((r) => {

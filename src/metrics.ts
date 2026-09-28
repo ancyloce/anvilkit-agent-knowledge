@@ -17,6 +17,9 @@ export class Metrics {
 	readonly poolTotal: Gauge;
 	readonly poolIdle: Gauge;
 	readonly dispatchQueries: Counter<"answer">;
+	readonly parseLaunches: Counter<"outcome">;
+	readonly parseResults: Counter<"outcome">;
+	readonly sourceCommands: Counter<"command" | "outcome">;
 
 	constructor(registry: Registry) {
 		const r = [registry];
@@ -92,6 +95,24 @@ export class Metrics {
 			name: "anvilkit_knowledge_background_dispatch_queries_total",
 			help: "Original-dispatch queries for expired external-effect leases by answer.",
 			labelNames: ["answer"],
+			registers: r,
+		});
+		this.parseLaunches = new Counter({
+			name: "anvilkit_knowledge_parse_launches_total",
+			help: "Parser Job create requests by outcome (created, exists, unresolved, refused).",
+			labelNames: ["outcome"],
+			registers: r,
+		});
+		this.parseResults = new Counter({
+			name: "anvilkit_knowledge_parse_results_total",
+			help: "Observed parser attempts by outcome (parsed, rejected, invalid, missing, job_failed, deadline).",
+			labelNames: ["outcome"],
+			registers: r,
+		});
+		this.sourceCommands = new Counter({
+			name: "anvilkit_knowledge_source_commands_total",
+			help: "Source Registry commands by command and outcome.",
+			labelNames: ["command", "outcome"],
 			registers: r,
 		});
 	}

@@ -29,6 +29,38 @@ export interface Config {
 	};
 	outbox: { consumerGroup: string };
 	control: { address: string; timeoutMs: number };
+	objects: {
+		endpoint: string;
+		stageEndpoint: string;
+		bucket: string;
+		region: string;
+		accessKeyId: string;
+		secretAccessKey: string;
+		credentialsFile: string;
+	};
+	sources: { maxBytes: number };
+	parser: {
+		profile: string;
+		namespace: string;
+		nodePool: string;
+		seccompProfile: string;
+		pollMs: number;
+		deadlineGraceMs: number;
+		presignTtlSeconds: number;
+		kubeTimeoutMs: number;
+		imageRegistry: string;
+		kubeconfig: string;
+	};
+	inference: {
+		url: string;
+		timeoutMs: number;
+		maxBatch: number;
+		embeddingProfile: string;
+		embeddingRevision: string;
+		dimensions: number;
+		rerankProfile: string;
+		rerankRevision: string;
+	};
 	apollo: { mode: "disabled" | "snapshot"; snapshotFile: string; appId: string };
 	reload: { intervalMs: number; drainLimitMs: number };
 }
@@ -61,10 +93,28 @@ const envOverrides: Record<string, string> = {
 	ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE: "database.url_file",
 	ANVILKIT_KNOWLEDGE_CONTROL_ADDRESS: "control.address",
 	ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE: "apollo.snapshot_file",
+	ANVILKIT_KNOWLEDGE_OBJECTS_ENDPOINT: "objects.endpoint",
+	ANVILKIT_KNOWLEDGE_OBJECTS_STAGE_ENDPOINT: "objects.stage_endpoint",
+	ANVILKIT_KNOWLEDGE_OBJECTS_ACCESS_KEY_ID: "objects.access_key_id",
+	ANVILKIT_KNOWLEDGE_OBJECTS_SECRET_ACCESS_KEY: "objects.secret_access_key",
+	ANVILKIT_KNOWLEDGE_OBJECTS_CREDENTIALS_FILE: "objects.credentials_file",
+	ANVILKIT_KNOWLEDGE_KUBECONFIG: "parser.kubeconfig",
+	ANVILKIT_KNOWLEDGE_IMAGE_REGISTRY: "parser.image_registry",
+	ANVILKIT_KNOWLEDGE_INFERENCE_URL: "inference.url",
 };
 
-const secretKeys = ["database.url"];
-const placementKeys = ["database.url_file", "control.address", "apollo.snapshot_file"];
+const secretKeys = ["database.url", "objects.access_key_id", "objects.secret_access_key"];
+const placementKeys = [
+	"database.url_file",
+	"control.address",
+	"apollo.snapshot_file",
+	"objects.endpoint",
+	"objects.stage_endpoint",
+	"objects.credentials_file",
+	"parser.kubeconfig",
+	"parser.image_registry",
+	"inference.url",
+];
 
 type Raw = Record<string, unknown>;
 
@@ -102,6 +152,27 @@ const defaults: Raw = {
 	tasks: { max_input_bytes: 65536, max_lease: "10m", retry_delay: "5s", max_attempts: 3, sweep_interval: "2s" },
 	outbox: { consumer_group: "anvilkit-agent-knowledge-forwarder" },
 	control: { timeout: "5s" },
+	objects: { bucket: "anvilkit-knowledge", region: "us-east-1" },
+	sources: { max_bytes: 33554432 },
+	parser: {
+		profile: "",
+		namespace: "anvilkit-parsing",
+		node_pool: "parsing",
+		seccomp_profile: "anvilkit/candidate.json",
+		poll_interval: "1s",
+		deadline_grace: "30s",
+		presign_ttl: "15m",
+		kube_timeout: "10s",
+	},
+	inference: {
+		timeout: "30s",
+		max_batch: 32,
+		embedding_profile: "bge-m3-v1",
+		embedding_revision: "5617a9f61b028005a4858fdac845db406aefb181",
+		dimensions: 1024,
+		rerank_profile: "bge-reranker-v2-m3-v1",
+		rerank_revision: "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+	},
 	apollo: { mode: "disabled", app_id: "anvilkit-agent-knowledge" },
 	reload: { interval: "2s", drain_limit: "30s" },
 };
@@ -122,6 +193,32 @@ const known = new Set([
 	"outbox.consumer_group",
 	"control.address",
 	"control.timeout",
+	"objects.endpoint",
+	"objects.stage_endpoint",
+	"objects.bucket",
+	"objects.region",
+	"objects.access_key_id",
+	"objects.secret_access_key",
+	"objects.credentials_file",
+	"sources.max_bytes",
+	"parser.profile",
+	"parser.namespace",
+	"parser.node_pool",
+	"parser.seccomp_profile",
+	"parser.poll_interval",
+	"parser.deadline_grace",
+	"parser.presign_ttl",
+	"parser.kube_timeout",
+	"parser.image_registry",
+	"parser.kubeconfig",
+	"inference.url",
+	"inference.timeout",
+	"inference.max_batch",
+	"inference.embedding_profile",
+	"inference.embedding_revision",
+	"inference.dimensions",
+	"inference.rerank_profile",
+	"inference.rerank_revision",
 	"apollo.mode",
 	"apollo.snapshot_file",
 	"apollo.app_id",
@@ -209,6 +306,14 @@ export function parseApolloSnapshot(text: string, appId: string, now: Date): Apo
 		if (typeof v !== "string") throw new ConfigError(`apollo snapshot: ${k} must be a string`);
 	}
 	return raw as unknown as ApolloSnapshot;
+}
+
+function fileDigest(path: string): string {
+	try {
+		return digestOf(readFileSync(path, "utf8"));
+	} catch {
+		return "unreadable";
+	}
 }
 
 function digestOf(text: string): string {
@@ -304,7 +409,13 @@ export function loadFrom(path: string, environ: NodeJS.ProcessEnv, number: numbe
 		number,
 		config: cfg,
 		digest,
-		secretRevision: digestOf(`database.url=${cfg.database.url}`),
+		secretRevision: digestOf(
+			[
+				`database.url=${cfg.database.url}`,
+				`objects=${cfg.objects.accessKeyId}:${cfg.objects.secretAccessKey}`,
+				`kubeconfig=${cfg.parser.kubeconfig ? fileDigest(cfg.parser.kubeconfig) : ""}`,
+			].join("\n"),
+		),
 		profiles: { "local-check-v1": digestOf("local-check-v1") },
 		apolloRelease,
 		expiresAt,
@@ -370,6 +481,29 @@ function validate(raw: Raw): Config {
 	if (sweep >= maxLease) errors.push("tasks.sweep_interval must be shorter than tasks.max_lease");
 	const mode = attempt(() => str(raw, "apollo.mode"), "disabled");
 	if (mode !== "disabled" && mode !== "snapshot") errors.push("apollo.mode must be disabled or snapshot");
+	let accessKeyId = attempt(() => str(raw, "objects.access_key_id"), "");
+	let secretAccessKey = attempt(() => str(raw, "objects.secret_access_key"), "");
+	const credentialsFile = attempt(() => str(raw, "objects.credentials_file"), "");
+	if (credentialsFile && (!accessKeyId || !secretAccessKey)) {
+		// KEY=VALUE lines; only the two credential names are read.
+		try {
+			for (const line of readFileSync(credentialsFile, "utf8").split("\n")) {
+				const m = /^([A-Z_]+)=(.*)$/.exec(line.trim());
+				if (m?.[1]?.endsWith("ACCESS_KEY_ID")) accessKeyId ||= m[2] ?? "";
+				else if (m?.[1]?.endsWith("SECRET_ACCESS_KEY")) secretAccessKey ||= m[2] ?? "";
+			}
+		} catch (err) {
+			errors.push(`objects.credentials_file: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+	const objectsEndpoint = attempt(() => str(raw, "objects.endpoint"), "");
+	if (objectsEndpoint && !/^https?:\/\//.test(objectsEndpoint)) errors.push("objects.endpoint must be an HTTP(S) URL");
+	if (objectsEndpoint && (!accessKeyId || !secretAccessKey))
+		errors.push("objects credentials are required with objects.endpoint");
+	const parserProfile = attempt(() => str(raw, "parser.profile"), "");
+	if (parserProfile && !objectsEndpoint) errors.push("parser.profile requires objects.endpoint");
+	const inferenceUrl = attempt(() => str(raw, "inference.url"), "");
+	if (inferenceUrl && !/^https?:\/\//.test(inferenceUrl)) errors.push("inference.url must be an HTTP(S) URL");
 	const cfg: Config = {
 		grpc: {
 			listen,
@@ -390,6 +524,40 @@ function validate(raw: Raw): Config {
 			address: attempt(() => str(raw, "control.address"), ""),
 			timeoutMs: attempt(() => duration(raw, "control.timeout", 1, 60_000), 5000),
 		},
+		objects: {
+			endpoint: objectsEndpoint,
+			stageEndpoint: attempt(() => str(raw, "objects.stage_endpoint"), ""),
+			bucket: attempt(() => str(raw, "objects.bucket"), ""),
+			region: attempt(() => str(raw, "objects.region"), ""),
+			accessKeyId,
+			secretAccessKey,
+			credentialsFile,
+		},
+		sources: { maxBytes: attempt(() => int(raw, "sources.max_bytes", 1, 268_435_456), 33_554_432) },
+		parser: {
+			profile: parserProfile,
+			namespace: attempt(() => str(raw, "parser.namespace"), ""),
+			nodePool: attempt(() => str(raw, "parser.node_pool"), ""),
+			seccompProfile: attempt(() => str(raw, "parser.seccomp_profile"), ""),
+			pollMs: attempt(() => duration(raw, "parser.poll_interval", 100, 60_000), 1000),
+			deadlineGraceMs: attempt(() => duration(raw, "parser.deadline_grace", 0, 600_000), 30_000),
+			presignTtlSeconds: Math.floor(
+				attempt(() => duration(raw, "parser.presign_ttl", 60_000, 3_600_000), 900_000) / 1000,
+			),
+			kubeTimeoutMs: attempt(() => duration(raw, "parser.kube_timeout", 100, 120_000), 10_000),
+			imageRegistry: attempt(() => str(raw, "parser.image_registry"), ""),
+			kubeconfig: attempt(() => str(raw, "parser.kubeconfig"), ""),
+		},
+		inference: {
+			url: inferenceUrl,
+			timeoutMs: attempt(() => duration(raw, "inference.timeout", 100, 600_000), 30_000),
+			maxBatch: attempt(() => int(raw, "inference.max_batch", 1, 128), 32),
+			embeddingProfile: attempt(() => str(raw, "inference.embedding_profile"), ""),
+			embeddingRevision: attempt(() => str(raw, "inference.embedding_revision"), ""),
+			dimensions: attempt(() => int(raw, "inference.dimensions", 1, 65_536), 1024),
+			rerankProfile: attempt(() => str(raw, "inference.rerank_profile"), ""),
+			rerankRevision: attempt(() => str(raw, "inference.rerank_revision"), ""),
+		},
 		apollo: {
 			mode: mode as "disabled" | "snapshot",
 			snapshotFile: attempt(() => str(raw, "apollo.snapshot_file"), ""),
@@ -402,6 +570,9 @@ function validate(raw: Raw): Config {
 	};
 	if (!cfg.outbox.consumerGroup) errors.push("outbox.consumer_group is required");
 	if (!cfg.apollo.appId) errors.push("apollo.app_id is required");
+	if (!/^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/.test(cfg.parser.namespace))
+		errors.push("parser.namespace is not a namespace");
+	if (!cfg.objects.bucket) errors.push("objects.bucket is required");
 	if (errors.length > 0) throw new ConfigError(`config: ${errors.join("; ")}`);
 	return cfg;
 }

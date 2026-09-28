@@ -6,6 +6,10 @@
 // admissions read the active generation; requests and leases keep what
 // they froze.
 import type pg from "pg";
+import { InferenceClient } from "./adapters/inference.js";
+import { type ParserProfile, parserProfile } from "./adapters/jobcontract.js";
+import { type Kube, KubeClient, loadKubeConfig } from "./adapters/kube.js";
+import { type ObjectStore, S3Objects } from "./adapters/objects.js";
 import { newPool, type Store } from "./adapters/postgres.js";
 import type { Tasks } from "./application/tasks.js";
 import { type Generation, inputsOf, loadFrom } from "./config.js";
@@ -15,10 +19,47 @@ import type { Metrics } from "./metrics.js";
 export interface Runtime {
 	gen: Generation;
 	pool: pg.Pool;
+	objects?: ObjectStore;
+	kube?: Kube;
+	parser?: ParserProfile;
+	inference?: InferenceClient;
 }
 
-/** Constructs and probes the pool of a generation; a failed probe closes it. */
+/**
+ * Constructs and probes the pool of a generation and builds its object
+ * store, Kubernetes client and reviewed parser profile; any failure closes
+ * what was built and rejects the generation.
+ */
 export async function buildRuntime(gen: Generation): Promise<Runtime> {
+	const c = gen.config;
+	let parser: ParserProfile | undefined;
+	let kube: Kube | undefined;
+	try {
+		parser = c.parser.profile ? parserProfile(c.parser.profile) : undefined;
+		kube = c.parser.profile ? new KubeClient(loadKubeConfig(c.parser.kubeconfig), c.parser.kubeTimeoutMs) : undefined;
+	} catch (err) {
+		throw new Error(`parser launcher: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	const objects = c.objects.endpoint
+		? new S3Objects({
+				endpoint: c.objects.endpoint,
+				stageEndpoint: c.objects.stageEndpoint,
+				bucket: c.objects.bucket,
+				region: c.objects.region,
+				accessKeyId: c.objects.accessKeyId,
+				secretAccessKey: c.objects.secretAccessKey,
+			})
+		: undefined;
+	const inf = c.inference;
+	const inference = inf.url
+		? new InferenceClient(inf.url, inf.timeoutMs, {
+				embeddingProfileId: inf.embeddingProfile,
+				embeddingModelRevision: inf.embeddingRevision,
+				dimensions: inf.dimensions,
+				rerankProfileId: inf.rerankProfile,
+				rerankModelRevision: inf.rerankRevision,
+			})
+		: undefined;
 	const pool = newPool(gen.config.database.url, gen.config.database.maxConn);
 	try {
 		const client = await pool.connect();
@@ -29,9 +70,11 @@ export async function buildRuntime(gen: Generation): Promise<Runtime> {
 		}
 	} catch (err) {
 		await pool.end().catch(() => undefined);
+		objects?.close();
+		kube?.close();
 		throw new Error(`database probe: ${err instanceof Error ? err.message : String(err)}`);
 	}
-	return { gen, pool };
+	return { gen, pool, objects, kube, parser, inference };
 }
 
 /** Drains the pool within the limit; reports whether the limit cut it short. */
@@ -44,6 +87,8 @@ export async function retire(rt: Runtime, limitMs: number): Promise<boolean> {
 		}, limitMs).unref(),
 	);
 	await Promise.race([rt.pool.end(), bound]);
+	rt.objects?.close();
+	rt.kube?.close();
 	return forced;
 }
 
@@ -65,6 +110,11 @@ export class Generations {
 
 	current(): Generation | null {
 		return this.active?.gen ?? null;
+	}
+
+	/** The active generation's clients; a request keeps the ones it started with. */
+	runtime(): Runtime | null {
+		return this.active;
 	}
 
 	activate(rt: Runtime): Promise<void> {
