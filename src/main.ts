@@ -7,11 +7,16 @@
 // generation's pool last, with the probe listener after it.
 import { collectDefaultMetrics, Registry } from "prom-client";
 import { ControlDispatchQuery } from "./adapters/control.js";
+import type { ParserProfile } from "./adapters/jobcontract.js";
 import { Store } from "./adapters/postgres.js";
+import { Indexer } from "./application/indexer.js";
 import { Ingest, planOf } from "./application/ingest.js";
+import { Retrieval } from "./application/retrieval.js";
+import { Snapshots } from "./application/snapshots.js";
 import { Sources } from "./application/sources.js";
 import { noDispatchQuery, systemClock, Tasks } from "./application/tasks.js";
 import { defaultConfigFile, envConfigFile, type Generation, load } from "./config.js";
+import type { SpaceProfile } from "./domain/index.js";
 import { buildRuntime, Generations, retire } from "./generations.js";
 import { jsonLogger, type Logger } from "./log.js";
 import { Metrics } from "./metrics.js";
@@ -98,12 +103,58 @@ export async function start(
 		metrics,
 	);
 	tasks.setRecords("knowledge-ingest", ingest);
+	const indexer = new Indexer(
+		store,
+		tasks,
+		() => gens.runtime()?.vectors,
+		() => gens.runtime()?.inference,
+		() => gens.runtime()?.objects,
+		() => spaceOf(active(), gens.runtime()?.parser),
+		() => {
+			const i = active().index;
+			return { batchSize: i.batchSize, maxResultBytes: i.maxResultBytes, pollMs: i.pollMs };
+		},
+		systemClock,
+		log,
+		metrics,
+	);
+	tasks.setRecords("knowledge-project", indexer);
+	ingest.onIndexable((c, r) => indexer.scheduleIn(c, r));
+	if (!cfg.qdrant.url) log.warn("no Qdrant placement: nothing is indexed or retrieved (qdrant.url unset)");
 	if (!cfg.parser.profile)
 		log.warn("no parser profile: sources are refused and ingest tasks fail (parser.profile unset)");
 	let ready = false;
 	const health = createHealthServer(registry, () => ready && tasks.ready());
-	const grpc = createGrpcServer(cfg.grpc.listen, cfg.grpc.capacity, tasks, log, sources, ingest);
+	const snapshots = new Snapshots(store, log);
+	const retrieval = new Retrieval(
+		store,
+		() => gens.runtime()?.vectors,
+		() => gens.runtime()?.inference,
+		() => gens.runtime()?.objects,
+		() => spaceOf(active(), gens.runtime()?.parser),
+		() => {
+			const r = active().retrieval;
+			return r.profileId ? { ...r } : undefined;
+		},
+		() => active().index.maxResultBytes,
+		systemClock,
+		log,
+		metrics,
+	);
+	const grpc = createGrpcServer(
+		cfg.grpc.listen,
+		cfg.grpc.capacity,
+		tasks,
+		log,
+		sources,
+		ingest,
+		indexer,
+		snapshots,
+		retrieval,
+	);
 	let sweeper: NodeJS.Timeout | undefined;
+	let reconciler: NodeJS.Timeout | undefined;
+	let reconciling: Promise<void> = Promise.resolve();
 	let watcher: NodeJS.Timeout | undefined;
 	let sweeping: Promise<void> = Promise.resolve();
 	let watching: Promise<void> = Promise.resolve();
@@ -118,6 +169,11 @@ export async function start(
 				await tasks.observe(cfg.outbox.consumerGroup);
 			});
 		}, cfg.tasks.sweepIntervalMs);
+		reconciler = setInterval(() => {
+			reconciling = reconciling.then(() =>
+				indexer.reconcile().catch((err) => log.warn("index reconciliation failed", { error: String(err) })),
+			);
+		}, cfg.index.qualifyIntervalMs);
 		watcher = setInterval(() => {
 			watching = watching.then(() =>
 				gens.reload().then(
@@ -134,6 +190,7 @@ export async function start(
 	} catch (err) {
 		// Unwind: no listener or loop survives a failed start.
 		if (sweeper) clearInterval(sweeper);
+		if (reconciler) clearInterval(reconciler);
 		if (watcher) clearInterval(watcher);
 		await grpc.stop(0).catch(() => undefined);
 		health.close();
@@ -162,8 +219,9 @@ export async function start(
 			grpc.withdraw();
 			const forcedServer = await grpc.stop(cfg.grpc.shutdownTimeoutMs);
 			if (sweeper) clearInterval(sweeper);
+			if (reconciler) clearInterval(reconciler);
 			if (watcher) clearInterval(watcher);
-			await Promise.all([sweeping, watching]).catch(() => undefined);
+			await Promise.all([sweeping, watching, reconciling]).catch(() => undefined);
 			const forcedDrain = await gens.shutdown(cfg.reload.drainLimitMs);
 			if (dispatch instanceof ControlDispatchQuery) dispatch.close();
 			metrics.drainSeconds.set((Date.now() - begin) / 1000);
@@ -175,6 +233,25 @@ export async function start(
 		return stopping;
 	};
 	return { stop, done };
+}
+
+/**
+ * The vector space new generations are built for: the reviewed embedding
+ * profile of the active configuration, its sparse profile and the chunker of
+ * the reviewed parser profile. Without an Inference placement or a parser
+ * profile no generation is created.
+ */
+export function spaceOf(c: Generation["config"], parser: ParserProfile | undefined): SpaceProfile | undefined {
+	if (!c.inference.url || !c.qdrant.url || !parser) return undefined;
+	return {
+		modelId: "bge-m3",
+		modelRevision: c.inference.embeddingRevision,
+		embeddingProfile: c.inference.embeddingProfile,
+		dimensions: c.inference.dimensions,
+		sparseProfile: c.index.sparseProfile,
+		chunkerProfile: parser.parser.chunker.chunkerId,
+		chunkerRevision: Number(parser.parser.chunker.revision),
+	};
 }
 
 const entry = process.argv[1] ?? "";

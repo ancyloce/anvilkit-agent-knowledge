@@ -1,6 +1,6 @@
 // The lane's Prometheus signals (DD-09 §6). Labels are controlled
 // vocabularies; no identifier or body is a label value.
-import { Counter, Gauge, type Registry } from "prom-client";
+import { Counter, Gauge, Histogram, type Registry } from "prom-client";
 
 export class Metrics {
 	readonly requests: Gauge<"state">;
@@ -20,6 +20,12 @@ export class Metrics {
 	readonly parseLaunches: Counter<"outcome">;
 	readonly parseResults: Counter<"outcome">;
 	readonly sourceCommands: Counter<"command" | "outcome">;
+	readonly indexBatches: Counter<"outcome">;
+	readonly indexGeneration: Gauge<"state">;
+	readonly searches: Counter<"outcome">;
+	readonly searchSeconds: Histogram;
+	readonly withheld: Counter<"stage">;
+	readonly retrievalCompute: Counter<"kind">;
 
 	constructor(registry: Registry) {
 		const r = [registry];
@@ -113,6 +119,42 @@ export class Metrics {
 			name: "anvilkit_knowledge_source_commands_total",
 			help: "Source Registry commands by command and outcome.",
 			labelNames: ["command", "outcome"],
+			registers: r,
+		});
+		this.indexBatches = new Counter({
+			name: "anvilkit_knowledge_index_batches_total",
+			help: "Index Builder steps by outcome (written, verified, rewrite, retry, materialized, failed).",
+			labelNames: ["outcome"],
+			registers: r,
+		});
+		this.indexGeneration = new Gauge({
+			name: "anvilkit_knowledge_index_generation",
+			help: "Newest index generation number in each state (0 when none).",
+			labelNames: ["state"],
+			registers: r,
+		});
+		this.searches = new Counter({
+			name: "anvilkit_knowledge_searches_total",
+			help: "Retrieval searches by outcome (answered, no_answer, refused, failed).",
+			labelNames: ["outcome"],
+			registers: r,
+		});
+		this.searchSeconds = new Histogram({
+			name: "anvilkit_knowledge_search_seconds",
+			help: "Duration of answered retrieval searches.",
+			buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30],
+			registers: r,
+		});
+		this.retrievalCompute = new Counter({
+			name: "anvilkit_knowledge_retrieval_compute_total",
+			help: "Inference work spent by searches (kind: query_embeddings, rerank_candidates).",
+			labelNames: ["kind"],
+			registers: r,
+		});
+		this.withheld = new Counter({
+			name: "anvilkit_knowledge_retrieval_withheld_total",
+			help: "Candidates withheld by an authorization or integrity recheck, by stage (before_read, before_return, integrity).",
+			labelNames: ["stage"],
 			registers: r,
 		});
 	}

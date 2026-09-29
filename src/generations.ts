@@ -11,6 +11,7 @@ import { type ParserProfile, parserProfile } from "./adapters/jobcontract.js";
 import { type Kube, KubeClient, loadKubeConfig } from "./adapters/kube.js";
 import { type ObjectStore, S3Objects } from "./adapters/objects.js";
 import { newPool, type Store } from "./adapters/postgres.js";
+import { QdrantIndex, type VectorIndex } from "./adapters/qdrant.js";
 import type { Tasks } from "./application/tasks.js";
 import { type Generation, inputsOf, loadFrom } from "./config.js";
 import type { Logger } from "./log.js";
@@ -23,6 +24,7 @@ export interface Runtime {
 	kube?: Kube;
 	parser?: ParserProfile;
 	inference?: InferenceClient;
+	vectors?: VectorIndex;
 }
 
 /**
@@ -60,6 +62,18 @@ export async function buildRuntime(gen: Generation): Promise<Runtime> {
 				rerankModelRevision: inf.rerankRevision,
 			})
 		: undefined;
+	const q = c.qdrant;
+	const vectors = q.url
+		? new QdrantIndex({
+				url: q.url,
+				apiKey: q.apiKey,
+				timeoutMs: q.timeoutMs,
+				replicationFactor: q.replicationFactor,
+				writeConsistencyFactor: q.writeConsistencyFactor,
+				writeOrdering: q.writeOrdering,
+				readConsistency: q.readConsistency,
+			})
+		: undefined;
 	const pool = newPool(gen.config.database.url, gen.config.database.maxConn);
 	try {
 		const client = await pool.connect();
@@ -74,7 +88,7 @@ export async function buildRuntime(gen: Generation): Promise<Runtime> {
 		kube?.close();
 		throw new Error(`database probe: ${err instanceof Error ? err.message : String(err)}`);
 	}
-	return { gen, pool, objects, kube, parser, inference };
+	return { gen, pool, objects, kube, parser, inference, vectors };
 }
 
 /** Drains the pool within the limit; reports whether the limit cut it short. */
@@ -89,6 +103,7 @@ export async function retire(rt: Runtime, limitMs: number): Promise<boolean> {
 	await Promise.race([rt.pool.end(), bound]);
 	rt.objects?.close();
 	rt.kube?.close();
+	rt.vectors?.close();
 	return forced;
 }
 

@@ -587,10 +587,11 @@ function validate(raw: Raw): Config {
 	const qdrantUrl = attempt(() => str(raw, "qdrant.url"), "");
 	if (qdrantUrl && !/^https?:\/\//.test(qdrantUrl)) errors.push("qdrant.url must be an HTTP(S) URL");
 	const qdrantKey = attempt(() => str(raw, "qdrant.api_key"), "");
-	if (qdrantUrl && !qdrantKey) errors.push("qdrant.api_key is required with qdrant.url (ANVILKIT_KNOWLEDGE_QDRANT_API_KEY)");
-	if (qdrantUrl && !inferenceUrl) errors.push("qdrant.url requires inference.url (the index is written from its vectors)");
+	if (qdrantUrl && !qdrantKey)
+		errors.push("qdrant.api_key is required with qdrant.url (ANVILKIT_KNOWLEDGE_QDRANT_API_KEY)");
 	const ordering = attempt(() => str(raw, "qdrant.write_ordering"), "strong");
-	if (!["weak", "medium", "strong"].includes(ordering)) errors.push("qdrant.write_ordering must be weak, medium or strong");
+	if (!["weak", "medium", "strong"].includes(ordering))
+		errors.push("qdrant.write_ordering must be weak, medium or strong");
 	const consistency = attempt(() => str(raw, "qdrant.read_consistency"), "all");
 	if (!["all", "majority", "quorum"].includes(consistency))
 		errors.push("qdrant.read_consistency must be all, majority or quorum");
@@ -702,7 +703,7 @@ function validate(raw: Raw): Config {
 	if (cfg.retrieval.rerankLimit > cfg.retrieval.fusedLimit)
 		errors.push("retrieval.rerank_limit must not exceed retrieval.fused_limit");
 	if (cfg.index.batchSize > cfg.inference.maxBatch) errors.push("index.batch_size must not exceed inference.max_batch");
-	if (cfg.retrieval.profileId && !cfg.qdrant.url) errors.push("retrieval.profile_id requires qdrant.url");
+
 	if (errors.length > 0) throw new ConfigError(`config: ${errors.join("; ")}`);
 	return cfg;
 }
