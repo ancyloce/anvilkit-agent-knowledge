@@ -58,16 +58,21 @@ export async function getGeneration(
 	generation: number,
 	forUpdate = false,
 ): Promise<IndexGeneration | undefined> {
-	const r = await c.query<GenerationRow>(
-		`${generationSelect} WHERE generation = $1${forUpdate ? " FOR UPDATE" : ""}`,
-		[generation],
-	);
+	const r = await c.query<GenerationRow>(`${generationSelect} WHERE generation = $1${forUpdate ? " FOR UPDATE" : ""}`, [
+		generation,
+	]);
 	return r.rows[0] ? generationFromRow(r.rows[0]) : undefined;
 }
 
 /** The next generation number, recorded as building; a concurrent creator makes this insert fail (unique). */
-export async function insertGeneration(c: PoolClient, p: SpaceProfile, collectionOf: (n: number) => string): Promise<number> {
-	const next = await c.query<{ n: string }>("SELECT (COALESCE(max(generation), 0) + 1)::text AS n FROM index_generations");
+export async function insertGeneration(
+	c: PoolClient,
+	p: SpaceProfile,
+	collectionOf: (n: number) => string,
+): Promise<number> {
+	const next = await c.query<{ n: string }>(
+		"SELECT (COALESCE(max(generation), 0) + 1)::text AS n FROM index_generations",
+	);
 	const n = Number(next.rows[0]?.n ?? 1);
 	await c.query(
 		`INSERT INTO index_generations (generation, model_id, model_revision, chunker_profile, collection_name, state,

@@ -62,6 +62,9 @@ export interface Embedded {
 	modelRevision: string;
 }
 
+/** What the use cases need from Inference (tests substitute a deterministic double). */
+export type InferencePort = Pick<InferenceClient, "embed" | "rerank">;
+
 export class InferenceClient {
 	constructor(
 		private readonly url: string,

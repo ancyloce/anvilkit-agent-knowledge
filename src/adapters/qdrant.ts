@@ -8,13 +8,7 @@
 // same deterministic point ids. Knowledge is the only client and Qdrant is a
 // projection: nothing read here is authorization.
 import { QdrantClient } from "@qdrant/js-client-rest";
-import {
-	alias,
-	type IndexGeneration,
-	type PointPayload,
-	payloadIndexes,
-	vectorNames,
-} from "../domain/index.js";
+import { alias, type IndexGeneration, type PointPayload, payloadIndexes, vectorNames } from "../domain/index.js";
 
 export interface QdrantSettings {
 	url: string;
@@ -41,8 +35,10 @@ export interface StoredPoint {
 }
 
 /** A keyword condition list; every filter Knowledge sends is built from these. */
+export type Condition = { key: string; match: { value: string | number } | { any: string[] } } | { has_id: string[] };
 export interface Filter {
-	must: ({ key: string; match: { value: string | number } | { any: string[] } } | { has_id: string[] })[];
+	must: Condition[];
+	must_not?: Condition[];
 }
 
 export interface ScoredPoint {
