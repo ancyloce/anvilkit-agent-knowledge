@@ -11,6 +11,7 @@ export const parseFailure = {
 	jobFailed: "PARSER_JOB_FAILED",
 	deadline: "DEADLINE_EXCEEDED",
 	authorizationRevoked: "AUTHORIZATION_REVOKED",
+	superseded: "SUPERSEDED",
 } as const;
 
 export class ParseError extends Error {
@@ -156,6 +157,9 @@ export function jobManifest(
 			completions: 1,
 			parallelism: 1,
 			activeDeadlineSeconds,
+			// A backstop only: the launcher deletes each Job after reading its
+			// result and reaps the Jobs of ended attempts.
+			ttlSecondsAfterFinished: 3600,
 			template: {
 				metadata: { labels: podLabels },
 				spec: {
@@ -233,6 +237,12 @@ export function jobManifest(
 	};
 }
 
+function codePoints(s: string): number {
+	let n = 0;
+	for (const _ of s) n++;
+	return n;
+}
+
 export type JobPhase = "running" | "succeeded" | "failed" | "missing";
 
 /** The Job's terminal condition, if any; a missing Job is reported as such. */
@@ -305,7 +315,9 @@ export function checkResult(
 	if (r.chunks.length > profile.parser.maxChunks) fail("chunk bound");
 	r.chunks.forEach((c, i) => {
 		if (c.ordinal !== i) fail(`chunk ${i} ordinal`);
-		if (c.text.length > profile.parser.chunker.maxChunkChars) fail(`chunk ${i} length`);
+		// Characters are code points, as the parser and the schema count them
+		// (String.length would count UTF-16 units and refuse valid emoji/CJK).
+		if (codePoints(c.text) > profile.parser.chunker.maxChunkChars) fail(`chunk ${i} length`);
 		if (c.contentDigest !== digestOf(c.text)) fail(`chunk ${i} digest`);
 		if (c.locator.lineStart !== undefined && (c.locator.lineEnd ?? 0) < c.locator.lineStart)
 			fail(`chunk ${i} line range`);

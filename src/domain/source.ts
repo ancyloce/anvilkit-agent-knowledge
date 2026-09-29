@@ -147,9 +147,14 @@ export function principalsOf(scope: Scope): Set<string> {
 	return out;
 }
 
-/** Readable now: same tenant, not deleted and the current ACL names one of the scope's principals. */
-export function readable(s: Pick<Source, "tenantId" | "deleted" | "access">, scope: Scope): boolean {
+/**
+ * Readable now: same tenant, the scope's project when it names one (the
+ * listing's rule), not deleted and the current ACL names one of the scope's
+ * principals.
+ */
+export function readable(s: Pick<Source, "tenantId" | "projectId" | "deleted" | "access">, scope: Scope): boolean {
 	if (s.deleted || s.tenantId !== scope.tenantId) return false;
+	if (scope.projectId && s.projectId !== scope.projectId) return false;
 	const held = principalsOf(scope);
 	return s.access.some((e) => held.has(`${e.principalType}:${e.principalId}`));
 }
@@ -187,7 +192,12 @@ export function checkMediaType(bytes: Buffer, declared: string): MediaType {
 				throw mismatch();
 			}
 			if (text.includes("\u0000")) throw mismatch();
-			if (mt === "text/html" && !/<(!doctype\s+html|html)[\s>]/i.test(text.slice(0, 4096))) throw mismatch();
+			if (mt === "text/html") {
+				// The parser's rule exactly (jobs/parser guards.py): the first
+				// 4096 code points, lower-cased, contain "<!doctype html" or "<html".
+				const head = Array.from(text.slice(0, 8192)).slice(0, 4096).join("").toLowerCase();
+				if (!head.includes("<!doctype html") && !head.includes("<html")) throw mismatch();
+			}
 			return mt;
 		}
 	}
