@@ -7,21 +7,30 @@
 // (DEVELOPMENT_ONLY; workload mTLS is ENV-03), like the other new services.
 import {
 	AccessEntry,
+	AdvanceIndexRequest,
+	type AdvanceIndexResponse,
 	AdvanceParseRequest,
 	type AdvanceParseResponse,
 	BackgroundTask,
 	type BackgroundTaskServiceServer,
 	BackgroundTaskServiceService,
+	Citation,
 	ClaimTaskRequest,
 	type ClaimTaskResponse,
+	ContextItem,
+	CreateSnapshotRequest,
+	type CreateSnapshotResponse,
 	DeleteSourceRequest,
 	type DeleteSourceResponse,
+	GetSnapshotRequest,
+	type GetSnapshotResponse,
 	GetSourceRequest,
 	type GetSourceResponse,
 	GetTaskRequest,
 	type GetTaskResponse,
 	HeartbeatTaskRequest,
 	type HeartbeatTaskResponse,
+	IndexState,
 	type IngestServiceServer,
 	IngestServiceService,
 	IngestState,
@@ -30,6 +39,13 @@ import {
 	ParseState,
 	RegisterSourceRequest,
 	type RegisterSourceResponse,
+	type RetrievalServiceServer,
+	RetrievalServiceService,
+	SearchRequest,
+	type SearchResponse,
+	Snapshot,
+	type SnapshotServiceServer,
+	SnapshotServiceService,
 	Source,
 	SourceKind,
 	type SourceServiceServer,
@@ -50,10 +66,15 @@ import {
 	status,
 } from "@grpc/grpc-js";
 import { HealthImplementation } from "grpc-health-check";
+import type { Indexer } from "../application/indexer.js";
 import type { Ingest } from "../application/ingest.js";
+import type { Retrieval } from "../application/retrieval.js";
+import type { Snapshots } from "../application/snapshots.js";
 import type { Sources } from "../application/sources.js";
 import type { Tasks } from "../application/tasks.js";
+import { IndexError } from "../domain/index.js";
 import { ParseError } from "../domain/parse.js";
+import { type Snapshot as DomainSnapshot, RetrievalError } from "../domain/retrieval.js";
 import * as domain from "../domain/source.js";
 import { type Task, TaskError } from "../domain/task.js";
 
@@ -123,6 +144,19 @@ export function sourceToProto(s: domain.Source): Source {
 	});
 }
 
+/** The public Snapshot: identities, the generation, exact revisions (<source>@<revision>) and the frozen digest. */
+export function snapshotToProto(s: DomainSnapshot): Snapshot {
+	return Snapshot.fromPartial({
+		snapshotId: s.snapshotId,
+		tenantId: s.tenantId,
+		projectId: s.projectId,
+		indexGeneration: String(s.generation),
+		sourceRevisions: s.sources.map((x) => `${x.sourceId}@${x.sourceRevision}`),
+		contentDigest: s.contentDigest,
+		createdAt: s.createdAt,
+	});
+}
+
 function commandOf(c: { tenantId: string; commandId: string; actorId: string; requestDigest: string } | undefined) {
 	if (!c) throw new domain.SourceError("INVALID_ARGUMENT", "command is required");
 	return { tenantId: c.tenantId, commandId: c.commandId, actorId: c.actorId, requestDigest: c.requestDigest };
@@ -155,6 +189,39 @@ function toStatus(err: unknown): ServiceError {
 				return e(status.INVALID_ARGUMENT, err.message);
 			default:
 				return e(status.UNAVAILABLE, "DEPENDENCY_UNAVAILABLE");
+		}
+	}
+	if (err instanceof IndexError) {
+		switch (err.code) {
+			case "NOT_FOUND":
+				return e(status.NOT_FOUND, "NOT_FOUND");
+			case "STALE_EXECUTION":
+				return e(status.FAILED_PRECONDITION, err.message);
+			case "INVALID_ARGUMENT":
+				return e(status.INVALID_ARGUMENT, err.message);
+			default:
+				return e(status.UNAVAILABLE, "DEPENDENCY_UNAVAILABLE");
+		}
+	}
+	if (err instanceof RetrievalError) {
+		switch (err.code) {
+			case "NOT_FOUND":
+				return e(status.NOT_FOUND, "NOT_FOUND");
+			case "FORBIDDEN":
+				return e(status.PERMISSION_DENIED, err.message);
+			case "COMMAND_CONFLICT":
+				return e(status.ALREADY_EXISTS, err.message);
+			case "NOT_INDEXED":
+			case "PROFILE_UNQUALIFIED":
+				return e(status.FAILED_PRECONDITION, err.message);
+			case "SCOPE_TOO_LARGE":
+				return e(status.RESOURCE_EXHAUSTED, err.message);
+			case "DEADLINE_EXCEEDED":
+				return e(status.DEADLINE_EXCEEDED, "DEADLINE_EXCEEDED");
+			case "UNAVAILABLE":
+				return e(status.UNAVAILABLE, "DEPENDENCY_UNAVAILABLE");
+			default:
+				return e(status.INVALID_ARGUMENT, err.message);
 		}
 	}
 	if (err instanceof domain.SourceError) {
@@ -228,6 +295,9 @@ export function createGrpcServer(
 	log: { error(msg: string, f?: Record<string, string>): void },
 	sources?: Sources,
 	ingest?: Ingest,
+	indexer?: Indexer,
+	snapshots?: Snapshots,
+	retrieval?: Retrieval,
 ): GrpcServer {
 	const server = new Server();
 	const health = new HealthImplementation({ "": "NOT_SERVING" });
@@ -262,7 +332,13 @@ export function createGrpcServer(
 					)
 						cb(err as ServiceError, null);
 					else {
-						if (!(err instanceof TaskError) && !(err instanceof domain.SourceError) && !(err instanceof ParseError))
+						if (
+							!(err instanceof TaskError) &&
+							!(err instanceof domain.SourceError) &&
+							!(err instanceof ParseError) &&
+							!(err instanceof IndexError) &&
+							!(err instanceof RetrievalError)
+						)
 							log.error("unmapped knowledge error", { error: String(err) });
 						cb(toStatus(err), null);
 					}
@@ -431,8 +507,83 @@ export function createGrpcServer(
 					};
 				},
 			),
+			advanceIndex: guard(
+				"anvilkit.knowledge.v1.AdvanceIndexRequest",
+				AdvanceIndexRequest.toJSON,
+				async (req): Promise<AdvanceIndexResponse> => {
+					if (!indexer) throw new IndexError("UNAVAILABLE", "no index builder in this build");
+					const a = await indexer.advance(req.taskId, generationOf(req.generation), req.workerId, req.inputDigest);
+					return {
+						$type: "anvilkit.knowledge.v1.AdvanceIndexResponse",
+						state:
+							a.state === "running"
+								? IndexState.INDEX_STATE_RUNNING
+								: a.state === "materialized"
+									? IndexState.INDEX_STATE_MATERIALIZED
+									: IndexState.INDEX_STATE_FAILED,
+						resultRef: a.state === "materialized" ? a.resultRef : "",
+						resultDigest: a.state === "materialized" ? a.resultDigest : "",
+						failureCode: a.state === "failed" ? a.failureCode : undefined,
+						retryAfterMs: a.state === "running" ? a.retryAfterMs : 0,
+					};
+				},
+			),
 		};
 		server.addService(IngestServiceService, ing);
+	}
+	if (snapshots) {
+		const snap: SnapshotServiceServer = {
+			createSnapshot: guard(
+				"anvilkit.knowledge.v1.CreateSnapshotRequest",
+				CreateSnapshotRequest.toJSON,
+				async (req): Promise<CreateSnapshotResponse> => {
+					const out = await snapshots.create(commandOf(req.command), scopeOf(req.scope), req.sourceIds);
+					return {
+						$type: "anvilkit.knowledge.v1.CreateSnapshotResponse",
+						snapshot: snapshotToProto(out.snapshot),
+						existing: out.existing,
+					};
+				},
+			),
+			getSnapshot: guard(
+				"anvilkit.knowledge.v1.GetSnapshotRequest",
+				GetSnapshotRequest.toJSON,
+				async (req): Promise<GetSnapshotResponse> => ({
+					$type: "anvilkit.knowledge.v1.GetSnapshotResponse",
+					snapshot: snapshotToProto(await snapshots.get(scopeOf(req.scope), req.snapshotId)),
+				}),
+			),
+		};
+		server.addService(SnapshotServiceService, snap);
+	}
+	if (retrieval) {
+		const ret: RetrievalServiceServer = {
+			search: guard(
+				"anvilkit.knowledge.v1.SearchRequest",
+				SearchRequest.toJSON,
+				async (req): Promise<SearchResponse> => {
+					if (!req.deadline) throw new RetrievalError("INVALID_ARGUMENT", "deadline is required");
+					const out = await retrieval.search({
+						scope: scopeOf(req.scope),
+						snapshotId: req.snapshotId,
+						query: req.query,
+						maxContextItems: req.maxContextItems,
+						retrievalProfileId: req.retrievalProfileId,
+						deadline: req.deadline,
+					});
+					return {
+						$type: "anvilkit.knowledge.v1.SearchResponse",
+						items: out.items.map((i) =>
+							ContextItem.fromPartial({ citation: Citation.fromPartial(i.citation), text: i.text }),
+						),
+						noAnswer: out.noAnswer,
+						indexGeneration: String(out.indexGeneration),
+						authorizationRevision: out.authorizationRevision,
+					};
+				},
+			),
+		};
+		server.addService(RetrievalServiceService, ret);
 	}
 	return {
 		listen: () =>
