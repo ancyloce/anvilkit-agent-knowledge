@@ -143,6 +143,19 @@ describe("Inference client", () => {
 		expect(err).toBeInstanceOf(InferenceError);
 		expect((err as InferenceError).code).toBe("CAPACITY_EXHAUSTED");
 		expect((err as InferenceError).retryable).toBe(true);
+		for (const [status, retryable, code] of [
+			[503, true, "DEPENDENCY_UNAVAILABLE"],
+			[502, true, "DEPENDENCY_UNAVAILABLE"],
+			[400, false, "INVALID_ARGUMENT"],
+		] as const) {
+			reply = () => ({ status, body: "Service Unavailable" });
+			const plain = await client()
+				.embed(compute, "query", ["a"])
+				.catch((e: unknown) => e);
+			expect(plain, `plain-text ${status}`).toBeInstanceOf(InferenceError);
+			expect((plain as InferenceError).retryable).toBe(retryable);
+			expect((plain as InferenceError).code).toBe(code);
+		}
 		const down = new InferenceClient("http://127.0.0.1:1", 1000, profile);
 		await expect(down.embed(compute, "query", ["a"])).rejects.toMatchObject({ code: "DEPENDENCY_UNAVAILABLE" });
 	});

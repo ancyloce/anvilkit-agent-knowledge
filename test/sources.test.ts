@@ -250,4 +250,42 @@ describe("readability, access and deletion", () => {
 		const revoked = await eventsOf("source.authorization-revoked");
 		expect(revoked.some((e) => e.aggregateId === s.sourceId)).toBe(true);
 	});
+
+	it("a scope naming another project reads, changes and deletes nothing (the listing's rule)", async () => {
+		const s = (await register(alice, "scoped.md", "scoped\n")).source;
+		const otherProject: Scope = { ...alice, projectId: "proj_b" };
+		expect(await codeOf(sources.get(otherProject, s.sourceId))).toBe("NOT_FOUND");
+		expect(
+			await codeOf(
+				sources.updateAccess(cmd(otherProject), otherProject, s.sourceId, 1, [
+					{ principalType: "actor", principalId: "alice" },
+				]),
+			),
+		).toBe("NOT_FOUND");
+		expect(await codeOf(sources.delete(cmd(otherProject), otherProject, s.sourceId, 1))).toBe("NOT_FOUND");
+		const tenantWide: Scope = { ...alice, projectId: "" };
+		expect((await sources.get(tenantWide, s.sourceId)).sourceId).toBe(s.sourceId);
+		expect((await sources.list(tenantWide, "", 200)).sources.map((x) => x.sourceId)).toContain(s.sourceId);
+		expect((await sources.list(otherProject, "", 200)).sources.map((x) => x.sourceId)).not.toContain(s.sourceId);
+	});
+});
+
+describe("media types", () => {
+	it("admits HTML exactly when the parser will (its marker rule)", async () => {
+		const html = async (name: string, text: string) => {
+			const u = upload(alice, name, text);
+			return codeOf(
+				sources.register(
+					cmd(alice),
+					alice,
+					{ kind: "document", locator: u.locator, contentDigest: u.digest, mediaType: "text/html", sizeBytes: u.size },
+					[],
+				),
+			);
+		};
+		expect(await html("a.html", "<!DOCTYPE html><html><body>x</body></html>")).toBe("OK");
+		expect(await html("b.html", "<html lang=en><body>x</body></html>")).toBe("OK");
+		expect(await html("c.html", "<!DOCTYPE  html><body>x</body>")).toBe("SOURCE_UNVERIFIED");
+		expect(await html("d.html", "<!doctype\nhtml><body>x</body>")).toBe("SOURCE_UNVERIFIED");
+	});
 });

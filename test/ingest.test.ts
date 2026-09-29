@@ -211,6 +211,7 @@ describe("launch", () => {
 		const job = kube.job(key);
 		const pod = job.spec.template.spec;
 		expect(job.spec.backoffLimit).toBe(0);
+		expect(job.spec.ttlSecondsAfterFinished).toBe(3600);
 		expect(pod.automountServiceAccountToken).toBe(false);
 		expect(pod.enableServiceLinks).toBe(false);
 		expect(pod.nodeSelector).toEqual({ "anvilkit.io/pool": "components" });
@@ -462,5 +463,88 @@ describe("launch failures", () => {
 			[taskId],
 		);
 		expect(ing.rows[0]).toEqual({ state: "failed", failure_code: "CANCELED" });
+	});
+});
+
+describe("review repairs", () => {
+	it("counts chunk length in code points, as the parser does", async () => {
+		const text = "# Emoji\n\nwide text\n";
+		const { taskId, inputDigest } = await registered(text);
+		await tasks.claim(taskId, 1, "w1", 600_000);
+		await advance(taskId, "w1", inputDigest);
+		const key = launchKeyOf(taskId, 1, 1);
+		kube.finish(key, "Complete");
+		const wide = "😀".repeat(1000) + "a".repeat(1000);
+		expect(wide.length).toBe(3000);
+		objects.objects.set(
+			resultKeyOf(key),
+			resultFor(key, text, {
+				chunks: [
+					{
+						ordinal: 0,
+						text: wide,
+						contentDigest: sha(wide),
+						locator: { element: "text", headingPath: ["Emoji"] },
+						qualityFlags: [],
+					},
+				],
+			}),
+		);
+		expect((await advance(taskId, "w1", inputDigest)).state).toBe("completed");
+	});
+
+	it("retires an earlier attempt's Job whose create answer was lost", async () => {
+		const { taskId, inputDigest } = await registered("# lost then retried\n");
+		await tasks.claim(taskId, 1, "w1", 600_000);
+		kube.failNextCreate = "lost";
+		expect((await advance(taskId, "w1", inputDigest)).state).toBe("launched");
+		const key1 = launchKeyOf(taskId, 1, 1);
+		expect(kube.job(key1)).toBeDefined();
+		await tasks.submit(taskId, 1, {
+			workerId: "w1",
+			inputDigest,
+			succeeded: false,
+			resultRef: "",
+			resultDigest: "",
+			failureCode: "HANDLER_TIMEOUT",
+		});
+		clock.advance(10_000);
+		await tasks.claim(taskId, 1, "w2", 600_000);
+		await advance(taskId, "w2", inputDigest);
+		expect(kube.job(key1)).toBeUndefined();
+		expect(kube.job(launchKeyOf(taskId, 1, 2))).toBeDefined();
+	});
+
+	it("reaps the Jobs of canceled and overdue attempts and closes their launches", async () => {
+		const canceled = await registered("# canceled\n");
+		await tasks.claim(canceled.taskId, 1, "w1", 3_600_000);
+		await advance(canceled.taskId, "w1", canceled.inputDigest);
+		const keyC = launchKeyOf(canceled.taskId, 1, 1);
+		await sources.delete(
+			{ tenantId: "tenant_a", commandId: `del_${canceled.sourceId}`, actorId: "alice", requestDigest: sha("del2") },
+			alice,
+			canceled.sourceId,
+			1,
+		);
+		const overdue = await registered("# overdue\n");
+		await tasks.claim(overdue.taskId, 1, "w1", 3_600_000);
+		await advance(overdue.taskId, "w1", overdue.inputDigest);
+		const keyO = launchKeyOf(overdue.taskId, 1, 1);
+		expect(kube.job(keyC)).toBeDefined();
+		expect(kube.job(keyO)).toBeDefined();
+		expect(await ingest.reapOrphans(50)).toBeGreaterThanOrEqual(1);
+		expect(kube.job(keyC)).toBeUndefined();
+		expect(kube.job(keyO)).toBeDefined();
+		clock.advance((profile.deadlineSeconds + 31) * 1000);
+		await ingest.reapOrphans(50);
+		expect(kube.job(keyO)).toBeUndefined();
+		const rows = await store.pool.query<{ task_id: string; state: string; failure_code: string }>(
+			"SELECT task_id, state, failure_code FROM parse_launches WHERE task_id = ANY($1)",
+			[[canceled.taskId, overdue.taskId]],
+		);
+		const byTask = Object.fromEntries(rows.rows.map((r) => [r.task_id, `${r.state}/${r.failure_code}`]));
+		expect(byTask[canceled.taskId]).toBe("failed/SUPERSEDED");
+		expect(byTask[overdue.taskId]).toBe("failed/DEADLINE_EXCEEDED");
+		expect(await ingest.reapOrphans(50)).toBe(0);
 	});
 });
