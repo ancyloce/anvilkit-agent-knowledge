@@ -114,6 +114,7 @@ export async function start(
 		sweeper = setInterval(() => {
 			sweeping = sweeping.then(async () => {
 				await tasks.sweepExpired(100).catch((err) => log.warn("lease sweep failed", { error: String(err) }));
+				await ingest.reapOrphans(20).catch((err) => log.warn("parser reap failed", { error: String(err) }));
 				await tasks.observe(cfg.outbox.consumerGroup);
 			});
 		}, cfg.tasks.sweepIntervalMs);

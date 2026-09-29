@@ -61,6 +61,34 @@ export interface Config {
 		rerankProfile: string;
 		rerankRevision: string;
 	};
+	qdrant: {
+		url: string;
+		apiKey: string;
+		timeoutMs: number;
+		replicationFactor: number;
+		writeConsistencyFactor: number;
+		writeOrdering: "weak" | "medium" | "strong";
+		readConsistency: "all" | "majority" | "quorum";
+	};
+	index: {
+		sparseProfile: string;
+		batchSize: number;
+		maxResultBytes: number;
+		pollMs: number;
+		qualifyIntervalMs: number;
+	};
+	retrieval: {
+		profileId: string;
+		denseLimit: number;
+		sparseLimit: number;
+		rrfK: number;
+		fusedLimit: number;
+		rerankLimit: number;
+		maxContextChars: number;
+		maxAllowedSources: number;
+		minRerankScore: number;
+		maxDeadlineMs: number;
+	};
 	apollo: { mode: "disabled" | "snapshot"; snapshotFile: string; appId: string };
 	reload: { intervalMs: number; drainLimitMs: number };
 }
@@ -101,9 +129,11 @@ const envOverrides: Record<string, string> = {
 	ANVILKIT_KNOWLEDGE_KUBECONFIG: "parser.kubeconfig",
 	ANVILKIT_KNOWLEDGE_IMAGE_REGISTRY: "parser.image_registry",
 	ANVILKIT_KNOWLEDGE_INFERENCE_URL: "inference.url",
+	ANVILKIT_KNOWLEDGE_QDRANT_URL: "qdrant.url",
+	ANVILKIT_KNOWLEDGE_QDRANT_API_KEY: "qdrant.api_key",
 };
 
-const secretKeys = ["database.url", "objects.access_key_id", "objects.secret_access_key"];
+const secretKeys = ["database.url", "objects.access_key_id", "objects.secret_access_key", "qdrant.api_key"];
 const placementKeys = [
 	"database.url_file",
 	"control.address",
@@ -114,6 +144,7 @@ const placementKeys = [
 	"parser.kubeconfig",
 	"parser.image_registry",
 	"inference.url",
+	"qdrant.url",
 ];
 
 type Raw = Record<string, unknown>;
@@ -173,6 +204,32 @@ const defaults: Raw = {
 		rerank_profile: "bge-reranker-v2-m3-v1",
 		rerank_revision: "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
 	},
+	qdrant: {
+		timeout: "10s",
+		replication_factor: 1,
+		write_consistency_factor: 1,
+		write_ordering: "strong",
+		read_consistency: "all",
+	},
+	index: {
+		sparse_profile: "bge-m3-lexical-v1",
+		batch_size: 16,
+		max_result_bytes: 16777216,
+		poll_interval: "200ms",
+		qualify_interval: "2s",
+	},
+	retrieval: {
+		profile_id: "",
+		dense_limit: 40,
+		sparse_limit: 40,
+		rrf_k: 60,
+		fused_limit: 40,
+		rerank_limit: 16,
+		max_context_chars: 16000,
+		max_allowed_sources: 256,
+		min_rerank_score: "0",
+		max_deadline: "60s",
+	},
 	apollo: { mode: "disabled", app_id: "anvilkit-agent-knowledge" },
 	reload: { interval: "2s", drain_limit: "30s" },
 };
@@ -219,6 +276,28 @@ const known = new Set([
 	"inference.dimensions",
 	"inference.rerank_profile",
 	"inference.rerank_revision",
+	"qdrant.url",
+	"qdrant.api_key",
+	"qdrant.timeout",
+	"qdrant.replication_factor",
+	"qdrant.write_consistency_factor",
+	"qdrant.write_ordering",
+	"qdrant.read_consistency",
+	"index.sparse_profile",
+	"index.batch_size",
+	"index.max_result_bytes",
+	"index.poll_interval",
+	"index.qualify_interval",
+	"retrieval.profile_id",
+	"retrieval.dense_limit",
+	"retrieval.sparse_limit",
+	"retrieval.rrf_k",
+	"retrieval.fused_limit",
+	"retrieval.rerank_limit",
+	"retrieval.max_context_chars",
+	"retrieval.max_allowed_sources",
+	"retrieval.min_rerank_score",
+	"retrieval.max_deadline",
 	"apollo.mode",
 	"apollo.snapshot_file",
 	"apollo.app_id",
@@ -414,6 +493,7 @@ export function loadFrom(path: string, environ: NodeJS.ProcessEnv, number: numbe
 				`database.url=${cfg.database.url}`,
 				`objects=${cfg.objects.accessKeyId}:${cfg.objects.secretAccessKey}`,
 				`kubeconfig=${cfg.parser.kubeconfig ? fileDigest(cfg.parser.kubeconfig) : ""}`,
+				`qdrant=${cfg.qdrant.apiKey}`,
 			].join("\n"),
 		),
 		profiles: { "local-check-v1": digestOf("local-check-v1") },
@@ -504,6 +584,20 @@ function validate(raw: Raw): Config {
 	if (parserProfile && !objectsEndpoint) errors.push("parser.profile requires objects.endpoint");
 	const inferenceUrl = attempt(() => str(raw, "inference.url"), "");
 	if (inferenceUrl && !/^https?:\/\//.test(inferenceUrl)) errors.push("inference.url must be an HTTP(S) URL");
+	const qdrantUrl = attempt(() => str(raw, "qdrant.url"), "");
+	if (qdrantUrl && !/^https?:\/\//.test(qdrantUrl)) errors.push("qdrant.url must be an HTTP(S) URL");
+	const qdrantKey = attempt(() => str(raw, "qdrant.api_key"), "");
+	if (qdrantUrl && !qdrantKey) errors.push("qdrant.api_key is required with qdrant.url (ANVILKIT_KNOWLEDGE_QDRANT_API_KEY)");
+	if (qdrantUrl && !inferenceUrl) errors.push("qdrant.url requires inference.url (the index is written from its vectors)");
+	const ordering = attempt(() => str(raw, "qdrant.write_ordering"), "strong");
+	if (!["weak", "medium", "strong"].includes(ordering)) errors.push("qdrant.write_ordering must be weak, medium or strong");
+	const consistency = attempt(() => str(raw, "qdrant.read_consistency"), "all");
+	if (!["all", "majority", "quorum"].includes(consistency))
+		errors.push("qdrant.read_consistency must be all, majority or quorum");
+	const minScoreText = attempt(() => str(raw, "retrieval.min_rerank_score"), "0");
+	const minScore = Number(minScoreText);
+	if (!/^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(minScoreText) || !Number.isFinite(minScore))
+		errors.push("retrieval.min_rerank_score must be a decimal");
 	const cfg: Config = {
 		grpc: {
 			listen,
@@ -558,6 +652,34 @@ function validate(raw: Raw): Config {
 			rerankProfile: attempt(() => str(raw, "inference.rerank_profile"), ""),
 			rerankRevision: attempt(() => str(raw, "inference.rerank_revision"), ""),
 		},
+		qdrant: {
+			url: qdrantUrl,
+			apiKey: qdrantKey,
+			timeoutMs: attempt(() => duration(raw, "qdrant.timeout", 100, 120_000), 10_000),
+			replicationFactor: attempt(() => int(raw, "qdrant.replication_factor", 1, 9), 1),
+			writeConsistencyFactor: attempt(() => int(raw, "qdrant.write_consistency_factor", 1, 9), 1),
+			writeOrdering: ordering as Config["qdrant"]["writeOrdering"],
+			readConsistency: consistency as Config["qdrant"]["readConsistency"],
+		},
+		index: {
+			sparseProfile: attempt(() => str(raw, "index.sparse_profile"), ""),
+			batchSize: attempt(() => int(raw, "index.batch_size", 1, 128), 16),
+			maxResultBytes: attempt(() => int(raw, "index.max_result_bytes", 1024, 268_435_456), 16_777_216),
+			pollMs: attempt(() => duration(raw, "index.poll_interval", 0, 60_000), 200),
+			qualifyIntervalMs: attempt(() => duration(raw, "index.qualify_interval", 100, 600_000), 2000),
+		},
+		retrieval: {
+			profileId: attempt(() => str(raw, "retrieval.profile_id"), ""),
+			denseLimit: attempt(() => int(raw, "retrieval.dense_limit", 1, 1000), 40),
+			sparseLimit: attempt(() => int(raw, "retrieval.sparse_limit", 1, 1000), 40),
+			rrfK: attempt(() => int(raw, "retrieval.rrf_k", 1, 1000), 60),
+			fusedLimit: attempt(() => int(raw, "retrieval.fused_limit", 1, 1000), 40),
+			rerankLimit: attempt(() => int(raw, "retrieval.rerank_limit", 1, 128), 16),
+			maxContextChars: attempt(() => int(raw, "retrieval.max_context_chars", 1, 1_000_000), 16_000),
+			maxAllowedSources: attempt(() => int(raw, "retrieval.max_allowed_sources", 1, 4096), 256),
+			minRerankScore: minScore,
+			maxDeadlineMs: attempt(() => duration(raw, "retrieval.max_deadline", 100, 600_000), 60_000),
+		},
 		apollo: {
 			mode: mode as "disabled" | "snapshot",
 			snapshotFile: attempt(() => str(raw, "apollo.snapshot_file"), ""),
@@ -573,6 +695,14 @@ function validate(raw: Raw): Config {
 	if (!/^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/.test(cfg.parser.namespace))
 		errors.push("parser.namespace is not a namespace");
 	if (!cfg.objects.bucket) errors.push("objects.bucket is required");
+	if (cfg.qdrant.writeConsistencyFactor > cfg.qdrant.replicationFactor)
+		errors.push("qdrant.write_consistency_factor must not exceed qdrant.replication_factor");
+	if (cfg.retrieval.fusedLimit > cfg.retrieval.denseLimit + cfg.retrieval.sparseLimit)
+		errors.push("retrieval.fused_limit must not exceed the two branch limits together");
+	if (cfg.retrieval.rerankLimit > cfg.retrieval.fusedLimit)
+		errors.push("retrieval.rerank_limit must not exceed retrieval.fused_limit");
+	if (cfg.index.batchSize > cfg.inference.maxBatch) errors.push("index.batch_size must not exceed inference.max_batch");
+	if (cfg.retrieval.profileId && !cfg.qdrant.url) errors.push("retrieval.profile_id requires qdrant.url");
 	if (errors.length > 0) throw new ConfigError(`config: ${errors.join("; ")}`);
 	return cfg;
 }
