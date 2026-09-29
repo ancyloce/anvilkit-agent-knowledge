@@ -166,11 +166,48 @@ export class Ingest implements ResultRecords {
 		if (!kube) return;
 		for (const old of await idb.earlierLaunches(this.store.pool, launch.taskId, launch.generation, launch.attempt)) {
 			try {
-				await kube.delete(this.jobPath(old.launchKey), old.jobUid);
+				const uid = old.jobUid || (await this.observedUid(old.launchKey));
+				if (uid) await kube.delete(this.jobPath(old.launchKey), uid);
 			} catch (err) {
 				this.log.warn("superseded parser Job not deleted", { launchKey: old.launchKey, error: String(err) });
 			}
 		}
+	}
+
+	/**
+	 * Deletes the Jobs of launches nobody will observe any more (their
+	 * attempt was superseded, canceled or ended, or their deadline passed)
+	 * and closes their records, so no Job or stage Secret outlives its
+	 * attempt. Runs in the sweeper; no row is locked while Kubernetes is called.
+	 */
+	async reapOrphans(limit: number): Promise<number> {
+		const kube = this.kube();
+		if (!kube) return 0;
+		const orphans = await idb.orphanedLaunches(
+			this.store.pool,
+			this.clock.now(),
+			this.settings().deadlineGraceMs,
+			limit,
+		);
+		let reaped = 0;
+		for (const o of orphans) {
+			try {
+				// The record closes only once the Job is deleted or known gone;
+				// a failed request leaves it open for the next sweep.
+				const path = this.jobPath(o.launchKey);
+				const uid = o.jobUid || ((await kube.get(path))?.metadata as { uid?: string } | undefined)?.uid || "";
+				if (uid) await kube.delete(path, uid);
+				await idb.updateLaunch(this.store.pool, o, {
+					state: "failed",
+					failureCode: o.reason === "deadline" ? parseFailure.deadline : parseFailure.superseded,
+				});
+				this.metrics.parseResults.inc({ outcome: o.reason });
+				reaped++;
+			} catch (err) {
+				this.log.warn("orphaned parser Job not reaped", { launchKey: o.launchKey, error: String(err) });
+			}
+		}
+		return reaped;
 	}
 
 	private async fail(launch: idb.ParseLaunch, code: string, outcome: string): Promise<ParseAnswer> {
