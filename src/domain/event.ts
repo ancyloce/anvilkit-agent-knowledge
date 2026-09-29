@@ -8,11 +8,16 @@ export const subjects = {
 	backgroundRequested: "anvilkit.knowledge.background.requested",
 	backgroundCompleted: "anvilkit.knowledge.background.completed",
 	sourceAuthorizationRevoked: "anvilkit.knowledge.source.authorization-revoked",
+	sourceRevisionIndexed: "anvilkit.knowledge.source.revision-indexed",
 } as const;
 
 export interface Envelope {
 	eventId: string;
-	eventType: "background.requested" | "background.completed" | "source.authorization-revoked";
+	eventType:
+		| "background.requested"
+		| "background.completed"
+		| "source.authorization-revoked"
+		| "source.revision-indexed";
 	schemaVersion: 1;
 	producer: typeof producer;
 	subject: string;
@@ -92,5 +97,35 @@ export function sourceRevokedEvent(
 		occurredAt: now.toISOString(),
 		correlationId,
 		payload: { kind: "source.authorization-revoked", sourceId: s.sourceId, aclRevision: String(s.aclRevision) },
+	};
+}
+
+/**
+ * A source revision became readable through the accepted index generation
+ * (its entry there was accepted). Identities and sequence numbers only.
+ */
+export function sourceIndexedEvent(
+	s: { sourceId: string; tenantId: string; sourceRevision: number; indexGeneration: number },
+	correlationId: string,
+	now: Date,
+): Envelope {
+	return {
+		eventId: randomUUID(),
+		eventType: "source.revision-indexed",
+		schemaVersion: 1,
+		producer,
+		subject: subjects.sourceRevisionIndexed,
+		tenantId: s.tenantId,
+		aggregateType: "source",
+		aggregateId: s.sourceId,
+		aggregateRevision: String(s.sourceRevision),
+		occurredAt: now.toISOString(),
+		correlationId,
+		payload: {
+			kind: "source.revision-indexed",
+			sourceId: s.sourceId,
+			sourceRevision: String(s.sourceRevision),
+			indexGeneration: String(s.indexGeneration),
+		},
 	};
 }

@@ -118,7 +118,10 @@ export const sourceKeyOf = (sourceId: string, revision: number): string => `${so
  */
 export function pointIdOf(chunkId: string): string {
 	const h = sha("point", chunkId);
-	return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-${((Number.parseInt(h.slice(16, 18), 16) & 0x3f) | 0x80)
+	return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-${(
+		(Number.parseInt(h.slice(16, 18), 16) & 0x3f) |
+		0x80
+	)
 		.toString(16)
 		.padStart(2, "0")}${h.slice(18, 20)}-${h.slice(20, 32)}`;
 }
@@ -185,7 +188,9 @@ export function manifestDigest(
 	points: { pointId: string; chunkId: string; contentDigest: string }[],
 ): string {
 	const h = createHash("sha256");
-	h.update(`${indexProfile}\n${g.generation}\n${g.modelRevision}\n${g.sparseProfile}\n${sourceKey}\n${points.length}\n`);
+	h.update(
+		`${indexProfile}\n${g.generation}\n${g.modelRevision}\n${g.sparseProfile}\n${sourceKey}\n${points.length}\n`,
+	);
 	for (const p of points) h.update(`${p.pointId} ${p.chunkId} ${p.contentDigest}\n`);
 	return `sha256:${h.digest("hex")}`;
 }
@@ -215,7 +220,8 @@ export function qualifies(p: {
 	countedPoints: number;
 }): { ok: true } | { ok: false; reason: string } {
 	if (p.open > 0) return { ok: false, reason: `${p.open} entries not accepted` };
-	if (p.accepted !== p.eligible) return { ok: false, reason: `${p.accepted} of ${p.eligible} source revisions indexed` };
+	if (p.accepted !== p.eligible)
+		return { ok: false, reason: `${p.accepted} of ${p.eligible} source revisions indexed` };
 	if (p.countedPoints !== p.expectedPoints)
 		return { ok: false, reason: `${p.countedPoints} points counted, ${p.expectedPoints} in the ledger` };
 	return { ok: true };

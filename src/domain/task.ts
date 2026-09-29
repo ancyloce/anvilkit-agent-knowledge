@@ -3,6 +3,7 @@
 // request and the clock. The same rules as the MCP owner (Go); the
 // application layer executes one decision inside one transaction.
 import { createHash } from "node:crypto";
+import { IndexError, indexProfile, parseIndexInput } from "./index.js";
 import { ingestProfile, parseIngestInput, SourceError } from "./source.js";
 
 export type TaskState =
@@ -181,6 +182,19 @@ export function newRequest(
 				throw new TaskError("INVALID_ARGUMENT", "an ingest request is authorized by its own source");
 		} catch (err) {
 			if (err instanceof SourceError) throw new TaskError("INVALID_ARGUMENT", err.message);
+			throw err;
+		}
+	} else if (p.profile === indexProfile) {
+		if (p.kind !== "knowledge-project")
+			throw new TaskError("INVALID_ARGUMENT", `${indexProfile} belongs to knowledge-project tasks`);
+		if (p.effects !== "reconstructible")
+			throw new TaskError("INVALID_ARGUMENT", "indexing is reconstructible computation");
+		try {
+			const input = parseIndexInput(p.input);
+			if (p.authorizationRef !== `source:${input.sourceId}`)
+				throw new TaskError("INVALID_ARGUMENT", "an index request is authorized by its own source");
+		} catch (err) {
+			if (err instanceof IndexError) throw new TaskError("INVALID_ARGUMENT", err.message);
 			throw err;
 		}
 	} else throw new TaskError("PROFILE_UNQUALIFIED", `result profile ${p.profile} has no acceptance rule in this build`);
