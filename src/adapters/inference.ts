@@ -92,20 +92,29 @@ export class InferenceClient {
 		if (declared > this.maxResponseBytes) throw new InferenceMismatch("response over the bound");
 		const bytes = Buffer.from(await res.arrayBuffer());
 		if (bytes.length > this.maxResponseBytes) throw new InferenceMismatch("response over the bound");
+		if (!res.ok) {
+			// An error is classified by its status first: an overloaded server
+			// or a proxy may answer in plain text, which is an outage, never a
+			// stale answer.
+			let e: Partial<ErrorEnvelope["error"]> | undefined;
+			try {
+				e = (parseStrictJson(bytes.toString("utf8")) as Partial<ErrorEnvelope>)?.error;
+			} catch {
+				e = undefined;
+			}
+			const unavailable = res.status >= 500 || res.status === 429;
+			throw new InferenceError(
+				res.status,
+				e?.code ?? (unavailable ? "DEPENDENCY_UNAVAILABLE" : "INVALID_ARGUMENT"),
+				e?.retryable ?? unavailable,
+				`inference ${res.status} ${e?.code ?? ""}`.trim(),
+			);
+		}
 		let value: unknown;
 		try {
 			value = parseStrictJson(bytes.toString("utf8"));
 		} catch {
 			throw new InferenceMismatch("response is not strict JSON");
-		}
-		if (!res.ok) {
-			const e = (value as Partial<ErrorEnvelope>)?.error;
-			throw new InferenceError(
-				res.status,
-				e?.code ?? "DEPENDENCY_UNAVAILABLE",
-				e?.retryable ?? res.status >= 500,
-				`inference ${res.status} ${e?.code ?? ""}`,
-			);
 		}
 		return value;
 	}

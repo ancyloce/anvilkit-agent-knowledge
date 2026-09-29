@@ -389,7 +389,11 @@ export async function getLaunch(
 	return r.rows[0] ? launchFromRow(r.rows[0]) : undefined;
 }
 
-/** Earlier attempts' launches whose Jobs may still exist (a newer claim supersedes them). */
+/**
+ * Earlier attempts' launches whose Jobs may still exist (a newer claim
+ * supersedes them), including creates whose answer never arrived (no UID
+ * recorded: the Job is found by its name).
+ */
 export async function earlierLaunches(
 	c: Queryable,
 	taskId: string,
@@ -397,10 +401,36 @@ export async function earlierLaunches(
 	attempt: number,
 ): Promise<ParseLaunch[]> {
 	const r = await c.query<LaunchRow>(
-		`${launchSelect} WHERE task_id = $1 AND generation = $2 AND attempt < $3 AND job_uid IS NOT NULL ORDER BY attempt`,
+		`${launchSelect} WHERE task_id = $1 AND generation = $2 AND attempt < $3 ORDER BY attempt`,
 		[taskId, generation, attempt],
 	);
 	return r.rows.map(launchFromRow);
+}
+
+/**
+ * Open launches nobody will observe any more: the attempt is no longer the
+ * task's current leased attempt (superseded, canceled, dead, stale, a
+ * failed or timed-out handler), or the deadline plus grace has passed.
+ */
+export async function orphanedLaunches(
+	c: Queryable,
+	now: Date,
+	graceMs: number,
+	limit: number,
+): Promise<(ParseLaunch & { reason: "superseded" | "deadline" })[]> {
+	const r = await c.query<LaunchRow & { reason: "superseded" | "deadline" }>(
+		`SELECT l.task_id, l.generation::text AS generation, l.attempt, l.launch_key, l.worker_id, l.profile_id,
+		   l.profile_revision::text AS profile_revision, l.input_digest, l.deadline, l.state, l.job_uid, l.result_key, l.result_digest,
+		   l.result_size::text AS result_size, l.verdict, l.failure_code,
+		   CASE WHEN r.state = 'leased' AND r.attempt_count = l.attempt THEN 'deadline' ELSE 'superseded' END AS reason
+		 FROM parse_launches l JOIN background_requests r ON r.task_id = l.task_id AND r.generation = l.generation
+		 WHERE l.state IN ('creating', 'running')
+		   AND (NOT (r.state = 'leased' AND r.attempt_count = l.attempt)
+		        OR l.deadline < $1::timestamptz - make_interval(secs => $2::float8 / 1000))
+		 ORDER BY l.updated_at LIMIT $3`,
+		[now, graceMs, limit],
+	);
+	return r.rows.map((row) => ({ ...launchFromRow(row), reason: row.reason }));
 }
 
 /** The create marker precedes the create request: state creating, create_requested. */
