@@ -38,6 +38,7 @@ import { type IngestInput, parseIngestInput } from "../domain/source.js";
 import { digestOf, type Submission, type Task } from "../domain/task.js";
 import type { Logger } from "../log.js";
 import type { Metrics } from "../metrics.js";
+import type { Indexable } from "./indexer.js";
 import type { IngestPlan } from "./sources.js";
 import type { Clock, PreparedResult, ResultRecords } from "./tasks.js";
 
@@ -59,6 +60,12 @@ interface Verified {
 }
 
 export class Ingest implements ResultRecords {
+	private indexable?: (c: db.PoolClient, r: Indexable) => Promise<number>;
+	/** The Index Builder's scheduling, run inside the transaction that accepts parsed chunks (P16). */
+	onIndexable(fn: (c: db.PoolClient, r: Indexable) => Promise<number>): void {
+		this.indexable = fn;
+	}
+
 	constructor(
 		private readonly store: db.Store,
 		private readonly kube: () => Kube | undefined,
@@ -502,12 +509,22 @@ export class Ingest implements ResultRecords {
 				ingestRequestId: ingest.requestId,
 			})),
 		);
-		// Parsed and accepted; the index generation of P16 moves it to indexed.
+		// Parsed and accepted; the accepted index generation moves it to indexed.
 		await idb.updateIngest(c, ingest.requestId, {
 			...common,
 			state: "indexing",
 			pageCount: result.pageCount,
 			chunkCount: result.chunks.length,
+		});
+		await this.indexable?.(c, {
+			requestId: ingest.requestId,
+			sourceId: ingest.sourceId,
+			sourceRevision: ingest.sourceRevision,
+			tenantId: task.tenantId,
+			chunkerProfile: ingest.chunkerProfile,
+			chunkerRevision: ingest.chunkerRevision,
+			chunkCount: result.chunks.length,
+			correlationId: task.correlationId,
 		});
 	}
 

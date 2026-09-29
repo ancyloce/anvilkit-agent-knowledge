@@ -8,6 +8,7 @@
 // current revisions; both append an ACL revision (deletion one without
 // entries) and publish source.authorization-revoked when access shrinks.
 // Every command is idempotent by (tenant, command) and its request digest.
+import * as idx from "../adapters/indexdb.js";
 import * as idb from "../adapters/ingestdb.js";
 import { ObjectMissing, type ObjectStore, ObjectTooLarge } from "../adapters/objects.js";
 import * as db from "../adapters/postgres.js";
@@ -297,6 +298,10 @@ export class Sources {
 			await idb.setAclRevision(c, sourceId, next);
 			await idb.markDeleted(c, sourceId);
 			for (const taskId of await idb.openIngestTasks(c, sourceId)) await this.tasks.cancelIn(c, taskId);
+			// P16: open index work stops with readability; the vector points are
+			// purged from every generation afterwards (Indexer.reconcile).
+			for (const taskId of await idx.openIndexTasks(c, sourceId)) await this.tasks.cancelIn(c, taskId);
+			await idx.staleEntries(c, sourceId);
 			await idb.insertCommand(c, cmd.tenantId, cmd.commandId, {
 				commandKind: "delete",
 				requestDigest: cmd.requestDigest,
