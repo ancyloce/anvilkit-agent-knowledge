@@ -9,6 +9,8 @@ export const subjects = {
 	backgroundCompleted: "anvilkit.knowledge.background.completed",
 	sourceAuthorizationRevoked: "anvilkit.knowledge.source.authorization-revoked",
 	sourceRevisionIndexed: "anvilkit.knowledge.source.revision-indexed",
+	memoryFactConfirmed: "anvilkit.knowledge.memory.fact-confirmed",
+	memoryFactRevoked: "anvilkit.knowledge.memory.fact-revoked",
 } as const;
 
 export interface Envelope {
@@ -17,12 +19,14 @@ export interface Envelope {
 		| "background.requested"
 		| "background.completed"
 		| "source.authorization-revoked"
-		| "source.revision-indexed";
+		| "source.revision-indexed"
+		| "memory.fact-confirmed"
+		| "memory.fact-revoked";
 	schemaVersion: 1;
 	producer: typeof producer;
 	subject: string;
 	tenantId: string;
-	aggregateType: "background_request" | "source";
+	aggregateType: "background_request" | "source" | "memory_fact";
 	aggregateId: string;
 	aggregateRevision: string;
 	occurredAt: string;
@@ -126,6 +130,39 @@ export function sourceIndexedEvent(
 			sourceId: s.sourceId,
 			sourceRevision: String(s.sourceRevision),
 			indexGeneration: String(s.indexGeneration),
+		},
+	};
+}
+
+/**
+ * A committed memory decision that changes recall: memory.fact-confirmed, or
+ * memory.fact-revoked with the state that removed the fact (revoked,
+ * expired or deleted). Identities, revision and state only; never content.
+ */
+export function memoryFactEvent(
+	f: { factId: string; tenantId: string; revision: number },
+	state: "confirmed" | "revoked" | "expired" | "deleted",
+	correlationId: string,
+	now: Date,
+): Envelope {
+	const confirmed = state === "confirmed";
+	return {
+		eventId: randomUUID(),
+		eventType: confirmed ? "memory.fact-confirmed" : "memory.fact-revoked",
+		schemaVersion: 1,
+		producer,
+		subject: confirmed ? subjects.memoryFactConfirmed : subjects.memoryFactRevoked,
+		tenantId: f.tenantId,
+		aggregateType: "memory_fact",
+		aggregateId: f.factId,
+		aggregateRevision: String(f.revision),
+		occurredAt: now.toISOString(),
+		correlationId,
+		payload: {
+			kind: confirmed ? "memory.fact-confirmed" : "memory.fact-revoked",
+			factId: f.factId,
+			revision: String(f.revision),
+			state,
 		},
 	};
 }

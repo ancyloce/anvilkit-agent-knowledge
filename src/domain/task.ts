@@ -4,6 +4,7 @@
 // application layer executes one decision inside one transaction.
 import { createHash } from "node:crypto";
 import { IndexError, indexProfile, parseIndexInput } from "./index.js";
+import { MemoryError, parseProjectionInput, projectionProfile } from "./memory.js";
 import { ingestProfile, parseIngestInput, SourceError } from "./source.js";
 
 export type TaskState =
@@ -195,6 +196,19 @@ export function newRequest(
 				throw new TaskError("INVALID_ARGUMENT", "an index request is authorized by its own source");
 		} catch (err) {
 			if (err instanceof IndexError) throw new TaskError("INVALID_ARGUMENT", err.message);
+			throw err;
+		}
+	} else if (p.profile === projectionProfile) {
+		if (p.kind !== "memory-project")
+			throw new TaskError("INVALID_ARGUMENT", `${projectionProfile} belongs to memory-project tasks`);
+		if (p.effects !== "reconstructible")
+			throw new TaskError("INVALID_ARGUMENT", "a projection is reconstructible computation");
+		try {
+			const input = parseProjectionInput(p.input);
+			if (p.authorizationRef !== `memory:${input.factId}`)
+				throw new TaskError("INVALID_ARGUMENT", "a projection request is authorized by its own fact");
+		} catch (err) {
+			if (err instanceof MemoryError) throw new TaskError("INVALID_ARGUMENT", err.message);
 			throw err;
 		}
 	} else throw new TaskError("PROFILE_UNQUALIFIED", `result profile ${p.profile} has no acceptance rule in this build`);

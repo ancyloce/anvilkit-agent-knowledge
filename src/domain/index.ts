@@ -13,12 +13,20 @@ export const collectionOf = (generation: number): string => `${alias}-${generati
 /** The dense and sparse named vectors of every collection. */
 export const vectorNames = { dense: "dense", sparse: "sparse" } as const;
 
-/** The payload fields with explicit indexes; filters use nothing else. */
+/**
+ * The payload fields with explicit indexes; filters use nothing else. Since
+ * P17 a generation's collection also holds memory points (kind "memory",
+ * no source fields): document filters name source keys, so they never match
+ * a memory point, and memory filters name memory keys.
+ */
 export const payloadIndexes = {
 	tenant_id: "keyword",
 	project_id: "keyword",
 	source_id: "keyword",
 	source_key: "keyword",
+	kind: "keyword",
+	fact_id: "keyword",
+	memory_key: "keyword",
 } as const;
 
 export const indexProfile = "knowledge-index-v1";
