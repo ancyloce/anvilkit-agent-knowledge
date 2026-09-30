@@ -34,6 +34,9 @@ export interface Instance {
 	appUrl: string;
 	relayUrl: string;
 	forwarderUrl: string;
+	/** The PostgresStore vendor migration identity and the runtime Store role (P17). */
+	storeMigratorUrl: string;
+	storeUrl: string;
 	admin(sql: string, params?: unknown[]): Promise<pg.QueryResult>;
 	/** A statement as the cluster superuser (role changes, the rotation fixture). */
 	root(sql: string): Promise<void>;
@@ -57,6 +60,8 @@ export async function startInstance(): Promise<Instance> {
 		"CREATE ROLE anvilkit_knowledge_migrator LOGIN PASSWORD 'migrator'",
 		"CREATE ROLE anvilkit_knowledge_relay LOGIN PASSWORD 'relay'",
 		"CREATE ROLE anvilkit_knowledge_forwarder LOGIN PASSWORD 'forwarder'",
+		"CREATE ROLE anvilkit_knowledge_store_migrator LOGIN PASSWORD 'storemig'",
+		"CREATE ROLE anvilkit_knowledge_store LOGIN PASSWORD 'store'",
 		"CREATE DATABASE anvilkit_knowledge OWNER anvilkit_knowledge_migrator",
 	])
 		await root.query(s);
@@ -82,6 +87,8 @@ export async function startInstance(): Promise<Instance> {
 		appUrl: url("anvilkit_knowledge_app", "app"),
 		relayUrl: url("anvilkit_knowledge_relay", "relay"),
 		forwarderUrl: url("anvilkit_knowledge_forwarder", "forwarder"),
+		storeMigratorUrl: url("anvilkit_knowledge_store_migrator", "storemig"),
+		storeUrl: url("anvilkit_knowledge_store", "store"),
 		admin: (sql, params) => adminClient.query(sql, params),
 		root: async (sql) => {
 			const c = new pg.Client({ connectionString: adminUrl });

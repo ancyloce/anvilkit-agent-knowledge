@@ -31,6 +31,13 @@ describe("configuration generations", () => {
 			["tasks:\n  max_lease: 1s\n  sweep_interval: 2s\n", base, /shorter than tasks.max_lease/],
 			["tasks:\n  max_input_bytes: 70000\n", base, /max_input_bytes/],
 			["apollo:\n  mode: snapshot\n", base, /apollo.snapshot_file is required/],
+			// P16: the Qdrant placement and key are environment-only; the retrieval bounds must nest.
+			["qdrant:\n  api_key: k\n", base, /secret or a placement/],
+			["qdrant:\n  url: http://q:6333\n", base, /secret or a placement/],
+			["{}\n", { ...base, ANVILKIT_KNOWLEDGE_QDRANT_URL: "http://q:6333" }, /qdrant.api_key is required/],
+			["qdrant:\n  replication_factor: 1\n  write_consistency_factor: 2\n", base, /write_consistency_factor/],
+			["retrieval:\n  rerank_limit: 50\n  fused_limit: 40\n", base, /rerank_limit must not exceed/],
+			["retrieval:\n  min_rerank_score: high\n", base, /min_rerank_score must be a decimal/],
 		];
 		for (const [file, env, want] of cases) expect(() => loadFrom(write(file), env, 1)).toThrow(want);
 	});
