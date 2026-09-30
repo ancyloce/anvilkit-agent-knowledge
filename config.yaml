@@ -70,3 +70,50 @@ inference:
   dimensions: 1024
   rerank_profile: bge-reranker-v2-m3-v1
   rerank_revision: 953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e
+# P16: the vector projection and hybrid retrieval (DD-07 §3/§4). The Qdrant
+# placement and API key come from the environment only
+# (ANVILKIT_KNOWLEDGE_QDRANT_URL, ANVILKIT_KNOWLEDGE_QDRANT_API_KEY); without
+# them nothing is indexed or retrieved. Replication 1/1 and the retrieval
+# bounds below are DEVELOPMENT_ONLY (the production layout is RF=3/WCF=2,
+# platform.md); min_rerank_score is the development profile's no-answer
+# floor, not a qualified quality threshold.
+qdrant:
+  timeout: 10s
+  replication_factor: 1
+  write_consistency_factor: 1
+  write_ordering: strong
+  read_consistency: all
+index:
+  sparse_profile: bge-m3-lexical-v1
+  batch_size: 16
+  max_result_bytes: 16777216
+  poll_interval: 200ms
+  qualify_interval: 2s
+retrieval:
+  profile_id: hybrid-bge-m3-dev-v1
+  dense_limit: 40
+  sparse_limit: 40
+  rrf_k: 60
+  fused_limit: 40
+  rerank_limit: 16
+  max_context_chars: 16000
+  max_allowed_sources: 256
+  min_rerank_score: "0"
+  max_deadline: 60s
+# P17: MemoryFact and its projections (DD-07 §5). The PostgresStore
+# projection lives in its own vendor schema, prepared by the Store's own
+# migrations under a separate identity (dist/storemigrate.js) and used here
+# with ensureTables: false through its own pool; the runtime Store role's URL
+# is environment-only (ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL). Without it no
+# fact is projected to the Store (the projection tasks fail and are retried
+# by reconciliation). Semantic recall uses the vector generations of the
+# retrieval profile above; max_allowed_facts bounds the allowed-fact set of
+# one recall (a larger set is refused, never truncated). DEVELOPMENT_ONLY
+# bounds.
+store:
+  schema: memory_store
+  max_conn: 4
+memory:
+  max_allowed_facts: 1024
+  max_projection_epochs: 5
+  retry_delay: 30s

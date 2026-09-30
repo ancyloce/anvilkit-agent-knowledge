@@ -11,7 +11,7 @@ import { build } from "esbuild";
 const { dependencies = {} } = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
 
 const result = await build({
-	entryPoints: ["src/main.ts", "src/localcheck.ts"],
+	entryPoints: ["src/main.ts", "src/localcheck.ts", "src/storemigrate.ts", "src/memoryctl.ts"],
 	bundle: true,
 	platform: "node",
 	format: "esm",
