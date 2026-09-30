@@ -11,6 +11,8 @@ import {
 	type AdvanceIndexResponse,
 	AdvanceParseRequest,
 	type AdvanceParseResponse,
+	AdvanceProjectionRequest,
+	type AdvanceProjectionResponse,
 	BackgroundTask,
 	type BackgroundTaskServiceServer,
 	BackgroundTaskServiceService,
@@ -20,8 +22,17 @@ import {
 	ContextItem,
 	CreateSnapshotRequest,
 	type CreateSnapshotResponse,
+	DecideFactRequest,
+	type DecideFactResponse,
+	DeleteFactRequest,
+	type DeleteFactResponse,
 	DeleteSourceRequest,
 	type DeleteSourceResponse,
+	FactDecision,
+	FactOrigin,
+	FactState,
+	GetFactRequest,
+	type GetFactResponse,
 	GetSnapshotRequest,
 	type GetSnapshotResponse,
 	GetSourceRequest,
@@ -34,9 +45,18 @@ import {
 	type IngestServiceServer,
 	IngestServiceService,
 	IngestState,
+	ListFactsRequest,
+	type ListFactsResponse,
 	ListSourcesRequest,
 	type ListSourcesResponse,
+	MemoryFact,
+	type MemoryServiceServer,
+	MemoryServiceService,
 	ParseState,
+	ProposeFactRequest,
+	type ProposeFactResponse,
+	RecallFactsRequest,
+	type RecallFactsResponse,
 	RegisterSourceRequest,
 	type RegisterSourceResponse,
 	type RetrievalServiceServer,
@@ -68,11 +88,15 @@ import {
 import { HealthImplementation } from "grpc-health-check";
 import type { Indexer } from "../application/indexer.js";
 import type { Ingest } from "../application/ingest.js";
+import type { Memory } from "../application/memory.js";
+import type { MemoryProjector } from "../application/projection.js";
+import type { Recall } from "../application/recall.js";
 import type { Retrieval } from "../application/retrieval.js";
 import type { Snapshots } from "../application/snapshots.js";
 import type { Sources } from "../application/sources.js";
 import type { Tasks } from "../application/tasks.js";
 import { IndexError } from "../domain/index.js";
+import { type Fact, MemoryError } from "../domain/memory.js";
 import { ParseError } from "../domain/parse.js";
 import { type Snapshot as DomainSnapshot, RetrievalError } from "../domain/retrieval.js";
 import * as domain from "../domain/source.js";
@@ -157,6 +181,59 @@ export function snapshotToProto(s: DomainSnapshot): Snapshot {
 	});
 }
 
+const factStateTo: Record<Fact["state"], FactState> = {
+	proposed: FactState.FACT_STATE_PROPOSED,
+	confirmed: FactState.FACT_STATE_CONFIRMED,
+	rejected: FactState.FACT_STATE_REJECTED,
+	revoked: FactState.FACT_STATE_REVOKED,
+	expired: FactState.FACT_STATE_EXPIRED,
+};
+const factStateOf: Record<number, Fact["state"]> = {
+	[FactState.FACT_STATE_PROPOSED]: "proposed",
+	[FactState.FACT_STATE_CONFIRMED]: "confirmed",
+	[FactState.FACT_STATE_REJECTED]: "rejected",
+	[FactState.FACT_STATE_REVOKED]: "revoked",
+	[FactState.FACT_STATE_EXPIRED]: "expired",
+};
+const originOf: Record<number, Fact["origin"]> = {
+	[FactOrigin.FACT_ORIGIN_USER]: "user",
+	[FactOrigin.FACT_ORIGIN_MODEL]: "model",
+	[FactOrigin.FACT_ORIGIN_WORKER]: "worker",
+};
+const originTo: Record<Fact["origin"], FactOrigin> = {
+	user: FactOrigin.FACT_ORIGIN_USER,
+	model: FactOrigin.FACT_ORIGIN_MODEL,
+	worker: FactOrigin.FACT_ORIGIN_WORKER,
+};
+const decisionOf: Record<number, "confirm" | "reject" | "revoke"> = {
+	[FactDecision.FACT_DECISION_CONFIRM]: "confirm",
+	[FactDecision.FACT_DECISION_REJECT]: "reject",
+	[FactDecision.FACT_DECISION_REVOKE]: "revoke",
+};
+
+/** The public MemoryFact: identities, state, revision, provenance and, unless deleted, the content. */
+export function factToProto(f: Fact): MemoryFact {
+	return MemoryFact.fromPartial({
+		factId: f.factId,
+		tenantId: f.tenantId,
+		subjectType: f.subjectType,
+		subjectId: f.subjectId,
+		scopeId: f.scopeId,
+		content: f.deleted ? "" : f.content,
+		contentDigest: f.contentDigest,
+		state: factStateTo[f.state],
+		revision: String(f.revision),
+		proposer: f.proposer,
+		confirmer: f.confirmer || undefined,
+		sourceRefs: f.sourceRefs,
+		expiresAt: f.expiresAt ?? undefined,
+		createdAt: f.createdAt,
+		updatedAt: f.updatedAt,
+		origin: originTo[f.origin],
+		deleted: f.deleted,
+	});
+}
+
 function commandOf(c: { tenantId: string; commandId: string; actorId: string; requestDigest: string } | undefined) {
 	if (!c) throw new domain.SourceError("INVALID_ARGUMENT", "command is required");
 	return { tenantId: c.tenantId, commandId: c.commandId, actorId: c.actorId, requestDigest: c.requestDigest };
@@ -213,6 +290,32 @@ function toStatus(err: unknown): ServiceError {
 				return e(status.ALREADY_EXISTS, err.message);
 			case "NOT_INDEXED":
 			case "PROFILE_UNQUALIFIED":
+				return e(status.FAILED_PRECONDITION, err.message);
+			case "SCOPE_TOO_LARGE":
+				return e(status.RESOURCE_EXHAUSTED, err.message);
+			case "DEADLINE_EXCEEDED":
+				return e(status.DEADLINE_EXCEEDED, "DEADLINE_EXCEEDED");
+			case "UNAVAILABLE":
+				return e(status.UNAVAILABLE, "DEPENDENCY_UNAVAILABLE");
+			default:
+				return e(status.INVALID_ARGUMENT, err.message);
+		}
+	}
+	if (err instanceof MemoryError) {
+		switch (err.code) {
+			case "NOT_FOUND":
+				return e(status.NOT_FOUND, "NOT_FOUND");
+			case "FORBIDDEN":
+				return e(status.PERMISSION_DENIED, err.message);
+			case "COMMAND_CONFLICT":
+				return e(status.ALREADY_EXISTS, err.message);
+			case "REVISION_MISMATCH":
+			case "INVALID_TRANSITION":
+			case "PROVENANCE_STALE":
+			case "FACT_CONFLICT":
+			case "EXPIRED":
+			case "PROFILE_UNQUALIFIED":
+			case "STALE_EXECUTION":
 				return e(status.FAILED_PRECONDITION, err.message);
 			case "SCOPE_TOO_LARGE":
 				return e(status.RESOURCE_EXHAUSTED, err.message);
@@ -298,6 +401,9 @@ export function createGrpcServer(
 	indexer?: Indexer,
 	snapshots?: Snapshots,
 	retrieval?: Retrieval,
+	memory?: Memory,
+	projector?: MemoryProjector,
+	recall?: Recall,
 ): GrpcServer {
 	const server = new Server();
 	const health = new HealthImplementation({ "": "NOT_SERVING" });
@@ -337,7 +443,8 @@ export function createGrpcServer(
 							!(err instanceof domain.SourceError) &&
 							!(err instanceof ParseError) &&
 							!(err instanceof IndexError) &&
-							!(err instanceof RetrievalError)
+							!(err instanceof RetrievalError) &&
+							!(err instanceof MemoryError)
 						)
 							log.error("unmapped knowledge error", { error: String(err) });
 						cb(toStatus(err), null);
@@ -492,6 +599,27 @@ export function createGrpcServer(
 			failed: ParseState.PARSE_STATE_FAILED,
 		} as const;
 		const ing: IngestServiceServer = {
+			advanceProjection: guard(
+				"anvilkit.knowledge.v1.AdvanceProjectionRequest",
+				AdvanceProjectionRequest.toJSON,
+				async (req): Promise<AdvanceProjectionResponse> => {
+					if (!projector) throw new MemoryError("UNAVAILABLE", "no memory projector in this build");
+					const a = await projector.advance(req.taskId, generationOf(req.generation), req.workerId, req.inputDigest);
+					return {
+						$type: "anvilkit.knowledge.v1.AdvanceProjectionResponse",
+						state:
+							a.state === "running"
+								? IndexState.INDEX_STATE_RUNNING
+								: a.state === "materialized"
+									? IndexState.INDEX_STATE_MATERIALIZED
+									: IndexState.INDEX_STATE_FAILED,
+						resultRef: a.state === "materialized" ? a.resultRef : "",
+						resultDigest: a.state === "materialized" ? a.resultDigest : "",
+						failureCode: a.state === "failed" ? a.failureCode : undefined,
+						retryAfterMs: a.state === "running" ? a.retryAfterMs : 0,
+					};
+				},
+			),
 			advanceParse: guard(
 				"anvilkit.knowledge.v1.AdvanceParseRequest",
 				AdvanceParseRequest.toJSON,
@@ -555,6 +683,117 @@ export function createGrpcServer(
 			),
 		};
 		server.addService(SnapshotServiceService, snap);
+	}
+	if (memory) {
+		const mem: MemoryServiceServer = {
+			proposeFact: guard(
+				"anvilkit.knowledge.v1.ProposeFactRequest",
+				ProposeFactRequest.toJSON,
+				async (req): Promise<ProposeFactResponse> => {
+					const origin = originOf[req.origin];
+					if (!origin) throw new MemoryError("INVALID_ARGUMENT", "origin");
+					const out = await memory.propose(commandOf(req.command), scopeOf(req.scope), {
+						subjectType: req.subjectType,
+						subjectId: req.subjectId,
+						content: req.content,
+						sourceRefs: req.sourceRefs,
+						expiresAt: req.expiresAt ?? null,
+						origin,
+					});
+					return {
+						$type: "anvilkit.knowledge.v1.ProposeFactResponse",
+						fact: factToProto(out.fact),
+						existing: out.existing,
+					};
+				},
+			),
+			decideFact: guard(
+				"anvilkit.knowledge.v1.DecideFactRequest",
+				DecideFactRequest.toJSON,
+				async (req): Promise<DecideFactResponse> => {
+					const decision = decisionOf[req.decision];
+					if (!decision) throw new MemoryError("INVALID_ARGUMENT", "decision");
+					const out = await memory.decide(
+						commandOf(req.command),
+						scopeOf(req.scope),
+						req.factId,
+						sequenceOf(req.expectedRevision, "expected revision"),
+						decision,
+						req.reasonCode ?? "",
+						req.expiresAt ?? null,
+					);
+					return {
+						$type: "anvilkit.knowledge.v1.DecideFactResponse",
+						fact: factToProto(out.fact),
+						existing: out.existing,
+					};
+				},
+			),
+			getFact: guard(
+				"anvilkit.knowledge.v1.GetFactRequest",
+				GetFactRequest.toJSON,
+				async (req): Promise<GetFactResponse> => ({
+					$type: "anvilkit.knowledge.v1.GetFactResponse",
+					fact: factToProto(await memory.get(scopeOf(req.scope), req.factId)),
+				}),
+			),
+			listFacts: guard(
+				"anvilkit.knowledge.v1.ListFactsRequest",
+				ListFactsRequest.toJSON,
+				async (req): Promise<ListFactsResponse> => {
+					const out = await memory.list(
+						scopeOf(req.scope),
+						{ subjectType: req.subjectType, subjectId: req.subjectId, state: factStateOf[req.state] ?? "" },
+						req.cursor,
+						req.limit,
+					);
+					return {
+						$type: "anvilkit.knowledge.v1.ListFactsResponse",
+						facts: out.facts.map(factToProto),
+						nextCursor: out.nextCursor,
+					};
+				},
+			),
+			deleteFact: guard(
+				"anvilkit.knowledge.v1.DeleteFactRequest",
+				DeleteFactRequest.toJSON,
+				async (req): Promise<DeleteFactResponse> => {
+					const out = await memory.delete(
+						commandOf(req.command),
+						scopeOf(req.scope),
+						req.factId,
+						sequenceOf(req.expectedRevision, "expected revision"),
+					);
+					return {
+						$type: "anvilkit.knowledge.v1.DeleteFactResponse",
+						fact: factToProto(out.fact),
+						existing: out.existing,
+					};
+				},
+			),
+			recallFacts: guard(
+				"anvilkit.knowledge.v1.RecallFactsRequest",
+				RecallFactsRequest.toJSON,
+				async (req): Promise<RecallFactsResponse> => {
+					if (!recall) throw new MemoryError("UNAVAILABLE", "recall is not wired in this build");
+					if (!req.deadline) throw new MemoryError("INVALID_ARGUMENT", "deadline is required");
+					const out = await recall.recall({
+						scope: scopeOf(req.scope),
+						query: req.query,
+						maxFacts: req.maxFacts,
+						retrievalProfileId: req.retrievalProfileId,
+						deadline: req.deadline,
+					});
+					return {
+						$type: "anvilkit.knowledge.v1.RecallFactsResponse",
+						facts: out.facts.map(factToProto),
+						noAnswer: out.noAnswer,
+						indexGeneration: String(out.indexGeneration),
+					};
+				},
+			),
+		};
+		server.addService(MemoryServiceService, mem);
 	}
 	if (retrieval) {
 		const ret: RetrievalServiceServer = {
