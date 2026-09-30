@@ -80,6 +80,8 @@ func TestNodeRowsForwardedToJetStream(t *testing.T) {
 	for _, s := range []string{
 		"CREATE ROLE anvilkit_knowledge_app LOGIN PASSWORD 'app'", "CREATE ROLE anvilkit_knowledge_migrator LOGIN PASSWORD 'migrator'",
 		"CREATE ROLE anvilkit_knowledge_relay LOGIN PASSWORD 'relay'", "CREATE ROLE anvilkit_knowledge_forwarder LOGIN PASSWORD 'forwarder'",
+		// P17: migration 00005 lets the PostgresStore vendor identity create its schema.
+		"CREATE ROLE anvilkit_knowledge_store_migrator LOGIN PASSWORD 'store'",
 		"CREATE DATABASE anvilkit_knowledge OWNER anvilkit_knowledge_migrator",
 	} {
 		if _, err := admin.Exec(ctx, s); err != nil {
