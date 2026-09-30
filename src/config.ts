@@ -89,6 +89,8 @@ export interface Config {
 		minRerankScore: number;
 		maxDeadlineMs: number;
 	};
+	store: { url: string; schema: string; maxConn: number };
+	memory: { maxAllowedFacts: number; maxProjectionEpochs: number; retryDelayMs: number };
 	apollo: { mode: "disabled" | "snapshot"; snapshotFile: string; appId: string };
 	reload: { intervalMs: number; drainLimitMs: number };
 }
@@ -131,9 +133,16 @@ const envOverrides: Record<string, string> = {
 	ANVILKIT_KNOWLEDGE_INFERENCE_URL: "inference.url",
 	ANVILKIT_KNOWLEDGE_QDRANT_URL: "qdrant.url",
 	ANVILKIT_KNOWLEDGE_QDRANT_API_KEY: "qdrant.api_key",
+	ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL: "store.url",
 };
 
-const secretKeys = ["database.url", "objects.access_key_id", "objects.secret_access_key", "qdrant.api_key"];
+const secretKeys = [
+	"database.url",
+	"objects.access_key_id",
+	"objects.secret_access_key",
+	"qdrant.api_key",
+	"store.url",
+];
 const placementKeys = [
 	"database.url_file",
 	"control.address",
@@ -230,6 +239,8 @@ const defaults: Raw = {
 		min_rerank_score: "0",
 		max_deadline: "60s",
 	},
+	store: { schema: "memory_store", max_conn: 4 },
+	memory: { max_allowed_facts: 1024, max_projection_epochs: 5, retry_delay: "30s" },
 	apollo: { mode: "disabled", app_id: "anvilkit-agent-knowledge" },
 	reload: { interval: "2s", drain_limit: "30s" },
 };
@@ -298,6 +309,12 @@ const known = new Set([
 	"retrieval.max_allowed_sources",
 	"retrieval.min_rerank_score",
 	"retrieval.max_deadline",
+	"store.url",
+	"store.schema",
+	"store.max_conn",
+	"memory.max_allowed_facts",
+	"memory.max_projection_epochs",
+	"memory.retry_delay",
 	"apollo.mode",
 	"apollo.snapshot_file",
 	"apollo.app_id",
@@ -494,6 +511,7 @@ export function loadFrom(path: string, environ: NodeJS.ProcessEnv, number: numbe
 				`objects=${cfg.objects.accessKeyId}:${cfg.objects.secretAccessKey}`,
 				`kubeconfig=${cfg.parser.kubeconfig ? fileDigest(cfg.parser.kubeconfig) : ""}`,
 				`qdrant=${cfg.qdrant.apiKey}`,
+				`store=${cfg.store.url}`,
 			].join("\n"),
 		),
 		profiles: { "local-check-v1": digestOf("local-check-v1") },
@@ -595,6 +613,8 @@ function validate(raw: Raw): Config {
 	const consistency = attempt(() => str(raw, "qdrant.read_consistency"), "all");
 	if (!["all", "majority", "quorum"].includes(consistency))
 		errors.push("qdrant.read_consistency must be all, majority or quorum");
+	const storeUrl = attempt(() => str(raw, "store.url"), "");
+	if (storeUrl && !/^postgres(ql)?:\/\//.test(storeUrl)) errors.push("store.url must be a postgres URL");
 	const minScoreText = attempt(() => str(raw, "retrieval.min_rerank_score"), "0");
 	const minScore = Number(minScoreText);
 	if (!/^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(minScoreText) || !Number.isFinite(minScore))
@@ -681,6 +701,16 @@ function validate(raw: Raw): Config {
 			minRerankScore: minScore,
 			maxDeadlineMs: attempt(() => duration(raw, "retrieval.max_deadline", 100, 600_000), 60_000),
 		},
+		store: {
+			url: storeUrl,
+			schema: attempt(() => str(raw, "store.schema"), ""),
+			maxConn: attempt(() => int(raw, "store.max_conn", 1, 64), 4),
+		},
+		memory: {
+			maxAllowedFacts: attempt(() => int(raw, "memory.max_allowed_facts", 1, 16_384), 1024),
+			maxProjectionEpochs: attempt(() => int(raw, "memory.max_projection_epochs", 1, 100), 5),
+			retryDelayMs: attempt(() => duration(raw, "memory.retry_delay", 0, 3_600_000), 30_000),
+		},
 		apollo: {
 			mode: mode as "disabled" | "snapshot",
 			snapshotFile: attempt(() => str(raw, "apollo.snapshot_file"), ""),
@@ -696,6 +726,7 @@ function validate(raw: Raw): Config {
 	if (!/^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/.test(cfg.parser.namespace))
 		errors.push("parser.namespace is not a namespace");
 	if (!cfg.objects.bucket) errors.push("objects.bucket is required");
+	if (!/^[a-z][a-z0-9_]{0,62}$/.test(cfg.store.schema)) errors.push("store.schema must be a plain identifier");
 	if (cfg.qdrant.writeConsistencyFactor > cfg.qdrant.replicationFactor)
 		errors.push("qdrant.write_consistency_factor must not exceed qdrant.replication_factor");
 	if (cfg.retrieval.fusedLimit > cfg.retrieval.denseLimit + cfg.retrieval.sparseLimit)

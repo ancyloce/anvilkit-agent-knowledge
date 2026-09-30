@@ -11,6 +11,9 @@ import type { ParserProfile } from "./adapters/jobcontract.js";
 import { Store } from "./adapters/postgres.js";
 import { Indexer } from "./application/indexer.js";
 import { Ingest, planOf } from "./application/ingest.js";
+import { Memory } from "./application/memory.js";
+import { MemoryProjector } from "./application/projection.js";
+import { Recall } from "./application/recall.js";
 import { Retrieval } from "./application/retrieval.js";
 import { Snapshots } from "./application/snapshots.js";
 import { Sources } from "./application/sources.js";
@@ -141,6 +144,47 @@ export async function start(
 		log,
 		metrics,
 	);
+	// P17: MemoryFact decisions, their projections and recall. The vector
+	// space of memory points is the reviewed embedding profile alone (no
+	// chunker); it serves only generations of that space.
+	const memory = new Memory(
+		store,
+		tasks,
+		() => memorySpaceOf(active()),
+		() => active().memory,
+		systemClock,
+		log,
+		metrics,
+	);
+	const projector = new MemoryProjector(
+		store,
+		tasks,
+		() => gens.runtime()?.memoryStore,
+		() => gens.runtime()?.vectors,
+		() => gens.runtime()?.inference,
+		() => memorySpaceOf(active()),
+		() => active().memory,
+		systemClock,
+		log,
+		metrics,
+	);
+	tasks.setRecords("memory-project", projector);
+	indexer.setMemoryGate((g, v) => projector.generationReady(g, v));
+	if (!cfg.store.url) log.warn("no memory Store placement: facts are not projected to the Store (store.url unset)");
+	const recall = new Recall(
+		store,
+		() => gens.runtime()?.vectors,
+		() => gens.runtime()?.inference,
+		() => memorySpaceOf(active()),
+		() => {
+			const r = active().retrieval;
+			return r.profileId ? { ...r } : undefined;
+		},
+		() => active().memory,
+		systemClock,
+		log,
+		metrics,
+	);
 	const grpc = createGrpcServer(
 		cfg.grpc.listen,
 		cfg.grpc.capacity,
@@ -151,6 +195,9 @@ export async function start(
 		indexer,
 		snapshots,
 		retrieval,
+		memory,
+		projector,
+		recall,
 	);
 	let sweeper: NodeJS.Timeout | undefined;
 	let reconciler: NodeJS.Timeout | undefined;
@@ -171,7 +218,12 @@ export async function start(
 		}, cfg.tasks.sweepIntervalMs);
 		reconciler = setInterval(() => {
 			reconciling = reconciling.then(() =>
-				indexer.reconcile().catch((err) => log.warn("index reconciliation failed", { error: String(err) })),
+				indexer
+					.reconcile()
+					.catch((err) => log.warn("index reconciliation failed", { error: String(err) }))
+					.then(() => memory.expireDue(100))
+					.then(() => projector.reconcile())
+					.catch((err) => log.warn("memory reconciliation failed", { error: String(err) })),
 			);
 		}, cfg.index.qualifyIntervalMs);
 		watcher = setInterval(() => {
@@ -251,6 +303,20 @@ export function spaceOf(c: Generation["config"], parser: ParserProfile | undefin
 		sparseProfile: c.index.sparseProfile,
 		chunkerProfile: parser.parser.chunker.chunkerId,
 		chunkerRevision: Number(parser.parser.chunker.revision),
+	};
+}
+
+/** The vector space of memory points: the reviewed embedding profile, when Inference and Qdrant are placed. */
+export function memorySpaceOf(c: Generation["config"]): SpaceProfile | undefined {
+	if (!c.inference.url || !c.qdrant.url) return undefined;
+	return {
+		modelId: "bge-m3",
+		modelRevision: c.inference.embeddingRevision,
+		embeddingProfile: c.inference.embeddingProfile,
+		dimensions: c.inference.dimensions,
+		sparseProfile: c.index.sparseProfile,
+		chunkerProfile: "",
+		chunkerRevision: 0,
 	};
 }
 

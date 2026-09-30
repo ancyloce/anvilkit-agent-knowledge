@@ -26,6 +26,9 @@ export class Metrics {
 	readonly searchSeconds: Histogram;
 	readonly withheld: Counter<"stage">;
 	readonly retrievalCompute: Counter<"kind">;
+	readonly memoryDecisions: Counter<"decision" | "origin">;
+	readonly memoryProjections: Counter<"target" | "outcome">;
+	readonly recalls: Counter<"outcome">;
 
 	constructor(registry: Registry) {
 		const r = [registry];
@@ -155,6 +158,24 @@ export class Metrics {
 			name: "anvilkit_knowledge_retrieval_withheld_total",
 			help: "Candidates withheld by an authorization or integrity recheck, by stage (before_read, before_return, integrity).",
 			labelNames: ["stage"],
+			registers: r,
+		});
+		this.memoryDecisions = new Counter({
+			name: "anvilkit_knowledge_memory_decisions_total",
+			help: "Committed memory decisions by decision (propose, confirm, reject, revoke, expire, delete) and origin (user, model, worker, policy).",
+			labelNames: ["decision", "origin"],
+			registers: r,
+		});
+		this.memoryProjections = new Counter({
+			name: "anvilkit_knowledge_memory_projections_total",
+			help: "Memory projection steps by target kind (store, vectors) and outcome (applied, removed, superseded, retry, failed).",
+			labelNames: ["target", "outcome"],
+			registers: r,
+		});
+		this.recalls = new Counter({
+			name: "anvilkit_knowledge_memory_recalls_total",
+			help: "Memory recalls by outcome (answered, no_answer, refused, failed).",
+			labelNames: ["outcome"],
 			registers: r,
 		});
 	}

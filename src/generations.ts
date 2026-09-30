@@ -9,6 +9,7 @@ import type pg from "pg";
 import { InferenceClient } from "./adapters/inference.js";
 import { type ParserProfile, parserProfile } from "./adapters/jobcontract.js";
 import { type Kube, KubeClient, loadKubeConfig } from "./adapters/kube.js";
+import { type MemoryStorePort, PostgresMemoryStore } from "./adapters/memorystore.js";
 import { type ObjectStore, S3Objects } from "./adapters/objects.js";
 import { newPool, type Store } from "./adapters/postgres.js";
 import { QdrantIndex, type VectorIndex } from "./adapters/qdrant.js";
@@ -25,6 +26,8 @@ export interface Runtime {
 	parser?: ParserProfile;
 	inference?: InferenceClient;
 	vectors?: VectorIndex;
+	/** P17: the PostgresStore projection (its own pool under the Store role). */
+	memoryStore?: MemoryStorePort;
 }
 
 /**
@@ -74,6 +77,7 @@ export async function buildRuntime(gen: Generation): Promise<Runtime> {
 				readConsistency: q.readConsistency,
 			})
 		: undefined;
+	const memoryStore = c.store.url ? new PostgresMemoryStore(c.store.url, c.store.schema, c.store.maxConn) : undefined;
 	const pool = newPool(gen.config.database.url, gen.config.database.maxConn);
 	try {
 		const client = await pool.connect();
@@ -84,11 +88,12 @@ export async function buildRuntime(gen: Generation): Promise<Runtime> {
 		}
 	} catch (err) {
 		await pool.end().catch(() => undefined);
+		await memoryStore?.close().catch(() => undefined);
 		objects?.close();
 		kube?.close();
 		throw new Error(`database probe: ${err instanceof Error ? err.message : String(err)}`);
 	}
-	return { gen, pool, objects, kube, parser, inference, vectors };
+	return { gen, pool, objects, kube, parser, inference, vectors, memoryStore };
 }
 
 /** Drains the pool within the limit; reports whether the limit cut it short. */
@@ -104,6 +109,7 @@ export async function retire(rt: Runtime, limitMs: number): Promise<boolean> {
 	rt.objects?.close();
 	rt.kube?.close();
 	rt.vectors?.close();
+	await rt.memoryStore?.close().catch(() => undefined);
 	return forced;
 }
 
