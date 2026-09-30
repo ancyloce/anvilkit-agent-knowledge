@@ -392,6 +392,19 @@ export class Indexer implements ResultRecords {
 
 	private ensured = new Set<string>();
 
+	/**
+	 * P17: the memory points a generation must also hold before it
+	 * qualifies (MemoryProjector.generationReady); without a gate only the
+	 * document points count.
+	 */
+	private memoryGate?: (
+		g: IndexGeneration,
+		vectors: VectorIndex,
+	) => Promise<{ ok: true } | { ok: false; reason: string }>;
+	setMemoryGate(gate: NonNullable<Indexer["memoryGate"]>): void {
+		this.memoryGate = gate;
+	}
+
 	/** Records a new building generation for the active space (a rebuild when one already serves it). */
 	async createGeneration(): Promise<number | undefined> {
 		const space = this.space();
@@ -473,8 +486,13 @@ export class Indexer implements ResultRecords {
 	 */
 	private async qualify(vectors: VectorIndex, g: IndexGeneration): Promise<void> {
 		const p = await idx.progressOf(this.store.pool, g);
-		const counted = await vectors.count(g.collectionName, { must: [] });
-		const q = qualifies({ ...p, countedPoints: counted });
+		// Document points only: memory points (P17) are counted by the gate.
+		const counted = await vectors.count(g.collectionName, {
+			must: [],
+			must_not: [{ key: "kind", match: { value: "memory" } }],
+		});
+		let q = qualifies({ ...p, countedPoints: counted });
+		if (q.ok && this.memoryGate) q = await this.memoryGate(g, vectors);
 		if (!q.ok) {
 			if (g.state === "materialized") await this.store.inTx((c) => idx.reopenGeneration(c, g.generation));
 			return;
