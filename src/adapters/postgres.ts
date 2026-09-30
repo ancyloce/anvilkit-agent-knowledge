@@ -272,6 +272,15 @@ export async function sourceAuthorization(
 	ref: string,
 	tenantId: string,
 ): Promise<"current" | "revoked"> {
+	// A memory-project request is authorized by its fact existing in the
+	// tenant: a revoked or deleted fact still needs its tombstone applied,
+	// and the projection itself checks the fact's current revision (P17).
+	if (ref.startsWith("memory:")) {
+		const m = await c.query<{ tenant_id: string }>("SELECT tenant_id FROM memory_facts WHERE fact_id = $1", [
+			ref.slice("memory:".length),
+		]);
+		return m.rows[0]?.tenant_id === tenantId ? "current" : "revoked";
+	}
 	if (!ref.startsWith("source:")) return "revoked";
 	const r = await c.query<{ deleted: boolean; tenant_id: string }>(
 		"SELECT deleted, tenant_id FROM sources WHERE source_id = $1",
