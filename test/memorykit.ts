@@ -11,9 +11,11 @@ import { type MemoryStorePort, migrateStore, PostgresMemoryStore } from "../src/
 import { MemoryObjects } from "../src/adapters/objects.js";
 import * as db from "../src/adapters/postgres.js";
 import type { QdrantIndex } from "../src/adapters/qdrant.js";
+import { MemoryRemovalInventory } from "../src/adapters/removals.js";
 import { Indexer } from "../src/application/indexer.js";
 import { Memory, type MemoryBounds } from "../src/application/memory.js";
 import { MemoryProjector, type ProjectionAnswer } from "../src/application/projection.js";
+import { type RemovalBounds, Removals } from "../src/application/removals.js";
 import type { Tasks } from "../src/application/tasks.js";
 import type { SpaceProfile } from "../src/domain/index.js";
 import type { Command, Scope } from "../src/domain/source.js";
@@ -38,6 +40,12 @@ export interface Kit {
 	setVectors(v: QdrantIndex | undefined): void;
 	memory: Memory;
 	projector: MemoryProjector;
+	/** P23: the removal inventory (in memory) and its reconciliation; reconciled once by startKit. */
+	removals: Removals;
+	inventory: MemoryRemovalInventory;
+	removalBounds: RemovalBounds;
+	/** Unplaces (undefined) or replaces the removal inventory. */
+	setInventory(i: MemoryRemovalInventory | undefined): void;
 	indexer: Indexer;
 	metrics: Metrics;
 	bounds: MemoryBounds;
@@ -98,6 +106,20 @@ export async function startKit(): Promise<Kit> {
 	tasks.setRecords("knowledge-project", indexer);
 	tasks.setRecords("memory-project", projector);
 	indexer.setMemoryGate((g, v) => projector.generationReady(g, v));
+	const realInventory = new MemoryRemovalInventory();
+	let inventory: MemoryRemovalInventory | undefined = realInventory;
+	const removalBounds: RemovalBounds = { windowMarginMs: 300_000, reconcileIntervalMs: 30_000 };
+	const removals = new Removals(
+		store,
+		() => inventory,
+		() => removalBounds,
+		clock,
+		silentLogger,
+		metrics,
+	);
+	memory.setRemovals(removals);
+	projector.setGate(() => removals.ready());
+	await removals.tick();
 	return {
 		inst,
 		qdrant,
@@ -116,6 +138,12 @@ export async function startKit(): Promise<Kit> {
 		},
 		memory,
 		projector,
+		removals,
+		inventory: realInventory,
+		removalBounds,
+		setInventory: (i) => {
+			inventory = i;
+		},
 		indexer,
 		metrics,
 		bounds,
