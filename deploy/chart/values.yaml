@@ -16,6 +16,16 @@ image:
 imagePullSecrets: []
 replicaCount: 2
 
+# HorizontalPodAutoscaler (autoscaling/v2). Off unless the environment enables
+# it with an explicit maxReplicas: the maximum is bounded by downstream caps
+# and the database connection budget (deploy/gitops/lock.yaml), never a chart
+# default. While enabled the Deployment leaves replicas to the autoscaler.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 0
+  targetCPUUtilizationPercentage: 70
+
 serviceAccount:
   create: true
   name: ""
@@ -56,6 +66,18 @@ objects:
       name: ""
       key: credentials
 
+# P23: the removal inventory in the independent DR store (its own bucket,
+# user and bucket-limited policy): the endpoint and an existing Secret
+# holding a KEY=VALUE file with the ACCESS_KEY_ID and SECRET_ACCESS_KEY
+# lines. Empty endpoint: deletions and revocations are not preserved across
+# a database restore (the service warns).
+removals:
+  endpoint: ""
+  credentials:
+    secret:
+      name: ""
+      key: credentials
+
 # P15: the parser launcher. enabled renders the least Role and RoleBinding
 # in the parser namespace and mounts an expiring API token into the
 # knowledge container only; config.parser.profile names the reviewed
@@ -68,6 +90,24 @@ parser:
 # P15: the Inference placement (anvilkit-agent-inference); optional.
 inference:
   url: ""
+
+# P16: the Qdrant placement (ANVILKIT_KNOWLEDGE_QDRANT_URL) and, when the
+# cluster requires one, its API key from an existing Secret. The collection's
+# replication and write-consistency factors are configuration (config.qdrant).
+qdrant:
+  url: ""
+  apiKeySecret:
+    name: ""
+    key: apiKey
+
+# P17: the PostgresStore projection's own database identity
+# (ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL) from an existing Secret. Without it
+# the memory projection is not configured. An environment variable is read at
+# start: rotating it rolls the Pods (the app-role URL file reloads in place).
+store:
+  secret:
+    name: ""
+    key: url
 
 # The outbox forwarder sidecar: its own database identity
 # (anvilkit_knowledge_forwarder: SELECT on outbox, SELECT/INSERT/UPDATE on
@@ -211,3 +251,14 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 topologySpreadConstraints: []
+
+# A voluntary disruption (node drain, rollout) keeps at least one Pod serving.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Telemetry placement (P23): the collector's OTLP/HTTP base URL for spans
+# (ANVILKIT_KNOWLEDGE_TELEMETRY_OTLP_ENDPOINT); empty disables it. The metrics are on
+# the health listener's /metrics; scraping is the environment's pod annotations.
+telemetry:
+  otlpEndpoint: ""

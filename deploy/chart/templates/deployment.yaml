@@ -6,7 +6,9 @@ metadata:
   labels:
     {{- include "anvilkit-agent-knowledge.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "anvilkit-agent-knowledge.selectorLabels" . | nindent 6 }}
@@ -49,6 +51,10 @@ spec:
               value: {{ printf "%s:%d" .Values.listen.address (int .Values.listen.port) | quote }}
             - name: ANVILKIT_KNOWLEDGE_HEALTH_LISTEN
               value: {{ printf "%s:%d" .Values.listen.address (int .Values.health.port) | quote }}
+            {{- if .Values.telemetry.otlpEndpoint }}
+            - name: ANVILKIT_KNOWLEDGE_TELEMETRY_OTLP_ENDPOINT
+              value: {{ .Values.telemetry.otlpEndpoint | quote }}
+            {{- end }}
             # The secret as a mounted file: the kubelet refreshes it when the
             # Secret changes and the generation watcher publishes the new
             # generation (a new pool, probed, then the old one drained).
@@ -69,6 +75,15 @@ spec:
             - name: ANVILKIT_KNOWLEDGE_OBJECTS_CREDENTIALS_FILE
               value: /var/run/secrets/anvilkit/objects/{{ .Values.objects.credentials.secret.key }}
             {{- end }}
+            {{- if .Values.removals.endpoint }}
+            # P23: the removal inventory in the independent DR store (its own
+            # user and bucket-limited policy; the credentials as a mounted
+            # KEY=VALUE file).
+            - name: ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT
+              value: {{ .Values.removals.endpoint | quote }}
+            - name: ANVILKIT_KNOWLEDGE_REMOVALS_CREDENTIALS_FILE
+              value: /var/run/secrets/anvilkit/removals/{{ .Values.removals.credentials.secret.key }}
+            {{- end }}
             {{- if .Values.parser.enabled }}
             - name: ANVILKIT_KNOWLEDGE_IMAGE_REGISTRY
               value: {{ .Values.parser.imageRegistry | quote }}
@@ -76,6 +91,24 @@ spec:
             {{- if .Values.inference.url }}
             - name: ANVILKIT_KNOWLEDGE_INFERENCE_URL
               value: {{ .Values.inference.url | quote }}
+            {{- end }}
+            {{- if .Values.qdrant.url }}
+            - name: ANVILKIT_KNOWLEDGE_QDRANT_URL
+              value: {{ .Values.qdrant.url | quote }}
+            {{- end }}
+            {{- if .Values.qdrant.apiKeySecret.name }}
+            - name: ANVILKIT_KNOWLEDGE_QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.qdrant.apiKeySecret.name }}
+                  key: {{ .Values.qdrant.apiKeySecret.key }}
+            {{- end }}
+            {{- if .Values.store.secret.name }}
+            - name: ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.store.secret.name }}
+                  key: {{ .Values.store.secret.key }}
             {{- end }}
           ports:
             - name: grpc
@@ -114,6 +147,11 @@ spec:
             {{- if .Values.objects.endpoint }}
             - name: objects
               mountPath: /var/run/secrets/anvilkit/objects
+              readOnly: true
+            {{- end }}
+            {{- if .Values.removals.endpoint }}
+            - name: removals
+              mountPath: /var/run/secrets/anvilkit/removals
               readOnly: true
             {{- end }}
             {{- if .Values.parser.enabled }}
@@ -221,6 +259,11 @@ spec:
         - name: objects
           secret:
             secretName: {{ required "objects.credentials.secret.name is required with objects.endpoint" .Values.objects.credentials.secret.name }}
+        {{- end }}
+        {{- if .Values.removals.endpoint }}
+        - name: removals
+          secret:
+            secretName: {{ required "removals.credentials.secret.name is required with removals.endpoint" .Values.removals.credentials.secret.name }}
         {{- end }}
         {{- if .Values.parser.enabled }}
         - name: kube-api-access
