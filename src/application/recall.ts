@@ -48,6 +48,8 @@ export interface RecallResult {
 }
 
 export class Recall {
+	private open: () => boolean = () => true;
+
 	constructor(
 		private readonly store: db.Store,
 		private readonly vectors: () => VectorIndex | undefined,
@@ -60,8 +62,15 @@ export class Recall {
 		private readonly metrics: Metrics,
 	) {}
 
+	/** P23: nothing is recalled while the removal inventory is not reconciled. */
+	setGate(open: () => boolean): void {
+		this.open = open;
+	}
+
 	async recall(req: RecallRequest): Promise<RecallResult> {
 		try {
+			if (!this.open())
+				throw new MemoryError("UNAVAILABLE", "memory is closed until the removal inventory is reconciled");
 			const out = await this.run(req);
 			this.metrics.retrievalCompute.inc({ kind: "query_embeddings" }, out.compute.embeddings);
 			this.metrics.retrievalCompute.inc({ kind: "rerank_candidates" }, out.compute.rerankCandidates);

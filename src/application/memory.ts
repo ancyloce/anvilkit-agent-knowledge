@@ -8,7 +8,11 @@
 // subject and scope). The fact, its append-only decision, its outbox event
 // and the durable memory-project requests of every projection target
 // commit together; the projections (the PostgresStore and every vector
-// generation) follow from those requests and never decide anything.
+// generation) follow from those requests and never decide anything. A
+// deletion or revocation also commits its removal row and is answered only
+// once its record is in the removal inventory (removals.ts), which outlives
+// a restore of this database; memory serves only while that inventory is
+// reconciled.
 import * as idx from "../adapters/indexdb.js";
 import * as mdb from "../adapters/memorydb.js";
 import * as db from "../adapters/postgres.js";
@@ -35,10 +39,12 @@ import {
 	transition,
 	visible,
 } from "../domain/memory.js";
+import { RemovalError, type RemovalRecord, removalKeyOf, restoredRemoval } from "../domain/removal.js";
 import { type Command, checkCommand, principalsOf, type Scope, SourceError } from "../domain/source.js";
 import { digestOf } from "../domain/task.js";
 import type { Logger } from "../log.js";
 import type { Metrics } from "../metrics.js";
+import type { Removals, RestoreOutcome } from "./removals.js";
 import type { Clock, Tasks } from "./tasks.js";
 
 export interface MemoryBounds {
@@ -72,6 +78,8 @@ function uniqueViolation(err: unknown): string | undefined {
 }
 
 export class Memory {
+	private removals: Removals | undefined;
+
 	constructor(
 		protected readonly store: db.Store,
 		protected readonly tasks: Tasks,
@@ -81,6 +89,66 @@ export class Memory {
 		protected readonly log: Logger,
 		protected readonly metrics: Metrics,
 	) {}
+
+	/** P23: removal records and the gate of a restored database. */
+	setRemovals(r: Removals): void {
+		this.removals = r;
+		r.setTarget(this);
+	}
+
+	private gate(): void {
+		this.removals?.check();
+	}
+
+	/**
+	 * The removal row of a deletion or revocation, committed in its
+	 * transaction (the last statement before the commit, so its database
+	 * time is close to the commit's).
+	 */
+	private async removalIn(
+		c: db.PoolClient,
+		cmd: Command,
+		f: Fact,
+		next: Fact,
+		decision: RemovalRecord["decision"],
+		reasonCode: string,
+	): Promise<{ record: RemovalRecord; key: string }> {
+		const record: RemovalRecord = {
+			schemaVersion: 1,
+			kind: "memory-removal",
+			tenantId: f.tenantId,
+			commandId: cmd.commandId,
+			requestDigest: cmd.requestDigest,
+			factId: f.factId,
+			decision,
+			decider: cmd.actorId,
+			confirmer: decision === "revoke" ? f.confirmer : "",
+			reasonCode: decision === "revoke" ? reasonCode : "",
+			fromRevision: f.revision,
+			toRevision: next.revision,
+			recordedAt: (await mdb.removalTime(c)).toISOString(),
+		};
+		const key = removalKeyOf(await mdb.removalScope(c), record);
+		await mdb.insertRemoval(c, record, key);
+		return { record, key };
+	}
+
+	/** The committed removal is answered only once its record is in the inventory. */
+	private async recorded(write: (r: Removals) => Promise<void>): Promise<void> {
+		const removals = this.removals;
+		if (!removals) return;
+		try {
+			await write(removals);
+		} catch (err) {
+			this.log.warn("a committed memory removal is not recorded in the removal inventory yet", {
+				error: err instanceof Error ? err.name : String(err),
+			});
+			throw new MemoryError(
+				"UNAVAILABLE",
+				"the removal is committed but its inventory record is not confirmed; retry the command",
+			);
+		}
+	}
 
 	// ---------------------------------------------------------------------
 	// Provenance
@@ -125,6 +193,7 @@ export class Memory {
 	}
 
 	async propose(cmd: Command, scope: Scope, p: Proposal): Promise<{ fact: Fact; existing: boolean }> {
+		this.gate();
 		commandOf(cmd, scope);
 		if (!["user", "model", "worker"].includes(p.origin)) throw new MemoryError("INVALID_ARGUMENT", "origin");
 		const scopeId = subjectScopeOf(scope, p.subjectType, p.subjectId);
@@ -159,6 +228,10 @@ export class Memory {
 		};
 		try {
 			await this.store.inTx(async (c) => {
+				// A restore erased this proposal and a removal of its fact:
+				// the retried proposal never brings the content back.
+				if (await mdb.factRemoved(c, fact.factId))
+					throw new MemoryError("INVALID_TRANSITION", "the fact this command proposed was removed");
 				await mdb.insertFact(c, fact, cmd.commandId, cmd.requestDigest);
 				await mdb.insertDecision(c, {
 					decisionId: `${fact.factId}-r1`,
@@ -199,12 +272,17 @@ export class Memory {
 		reasonCode: string,
 		expiresAt: Date | null,
 	): Promise<{ fact: Fact; existing: boolean }> {
+		this.gate();
 		commandOf(cmd, scope);
 		if (expiresAt && decision !== "confirm")
 			throw new MemoryError("INVALID_ARGUMENT", "only a confirmation sets an expiry");
 		const replayed = await this.replay(cmd, decision, factId);
-		if (replayed) return replayed;
+		if (replayed) {
+			if (decision === "revoke") await this.recorded((r) => r.ensureRecorded(cmd.tenantId, cmd.commandId));
+			return replayed;
+		}
 		let fact: Fact;
+		let removal: { record: RemovalRecord; key: string } | undefined;
 		try {
 			fact = await this.store.inTx(async (c) => {
 				const f = await mdb.getFact(c, factId, true);
@@ -248,6 +326,7 @@ export class Memory {
 						memoryFactEvent(next, decision === "confirm" ? "confirmed" : "revoked", cmd.commandId, now),
 					);
 				await this.scheduleIn(c, next);
+				if (decision === "revoke") removal = await this.removalIn(c, cmd, f, next, "revoke", reasonCode);
 				return next;
 			});
 		} catch (err) {
@@ -256,10 +335,15 @@ export class Memory {
 				throw new MemoryError("FACT_CONFLICT", "a confirmed fact with this content exists for the subject");
 			if (constraint !== undefined) {
 				const again = await this.replay(cmd, decision, factId);
-				if (again) return again;
+				if (again) {
+					if (decision === "revoke") await this.recorded((r) => r.ensureRecorded(cmd.tenantId, cmd.commandId));
+					return again;
+				}
 			}
 			throw err;
 		}
+		const committed = removal;
+		if (committed) await this.recorded((r) => r.record(committed.record, committed.key));
 		this.metrics.memoryDecisions.inc({ decision, origin: "user" });
 		this.log.info("memory fact decided", { factId, decision, revision: fact.revision });
 		return { fact: (await mdb.getFact(this.store.pool, factId)) ?? fact, existing: false };
@@ -277,10 +361,15 @@ export class Memory {
 		factId: string,
 		expectedRevision: number,
 	): Promise<{ fact: Fact; existing: boolean }> {
+		this.gate();
 		commandOf(cmd, scope);
 		const replayed = await this.replay(cmd, "delete", factId);
-		if (replayed) return replayed;
+		if (replayed) {
+			await this.recorded((r) => r.ensureRecorded(cmd.tenantId, cmd.commandId));
+			return replayed;
+		}
 		let fact: Fact;
+		let removal: { record: RemovalRecord; key: string } | undefined;
 		try {
 			fact = await this.store.inTx(async (c) => {
 				const f = await mdb.getFact(c, factId, true);
@@ -312,15 +401,21 @@ export class Memory {
 				await this.scheduleIn(c, next);
 				// Never projected: nothing to clear.
 				await mdb.markPurgedIfComplete(c, f.factId);
+				removal = await this.removalIn(c, cmd, f, next, "delete", "");
 				return next;
 			});
 		} catch (err) {
 			if (uniqueViolation(err) !== undefined) {
 				const again = await this.replay(cmd, "delete", factId);
-				if (again) return again;
+				if (again) {
+					await this.recorded((r) => r.ensureRecorded(cmd.tenantId, cmd.commandId));
+					return again;
+				}
 			}
 			throw err;
 		}
+		const committed = removal;
+		if (committed) await this.recorded((r) => r.record(committed.record, committed.key));
 		this.metrics.memoryDecisions.inc({ decision: "delete", origin: "user" });
 		this.log.info("memory fact deleted", { factId, revision: fact.revision });
 		return { fact: (await mdb.getFact(this.store.pool, factId)) ?? fact, existing: false };
@@ -374,6 +469,7 @@ export class Memory {
 	}
 
 	async get(scope: Scope, factId: string): Promise<Fact> {
+		this.gate();
 		const f = await mdb.getFact(this.store.pool, factId);
 		// An unreadable fact is indistinguishable from a missing one.
 		if (!f || !visible(f, scope)) throw new MemoryError("NOT_FOUND", "fact");
@@ -386,6 +482,7 @@ export class Memory {
 		cursor: string,
 		limit: number,
 	): Promise<{ facts: Fact[]; nextCursor: string }> {
+		this.gate();
 		const pageSize = limit === 0 ? 50 : limit;
 		let after = "";
 		if (cursor) {
@@ -399,6 +496,73 @@ export class Memory {
 			facts: page,
 			nextCursor: rows.length > pageSize && last ? Buffer.from(last.factId).toString("base64url") : "",
 		};
+	}
+
+	/**
+	 * Re-applies a recorded removal a restore of this database erased (the
+	 * removal reconciliation of removals.ts): under its original command
+	 * identity, decider and reason, so a retry of that command replays it;
+	 * the fact ends as the record says (domain/removal.ts), its tombstone
+	 * requests go to every target it was projected to, and the restored row
+	 * keeps a fact the restore erased from being proposed again. A record
+	 * the database already holds only binds its key.
+	 */
+	async applyRestored(r: RemovalRecord, key: string): Promise<RestoreOutcome> {
+		const outcome = await this.store.inTx(async (c): Promise<RestoreOutcome> => {
+			const held = await mdb.removalByCommand(c, r.tenantId, r.commandId, true);
+			if (held) {
+				const same = held.record;
+				if (same.factId !== r.factId || same.decision !== r.decision || same.requestDigest !== r.requestDigest)
+					throw new RemovalError("a removal record differs from the database's decision under its command");
+				if (held.inventoryKey && held.inventoryKey !== key)
+					throw new RemovalError("a removal record is listed under another key than the database's");
+				if (!held.inventoryKey) await mdb.setRemovalKey(c, r.tenantId, r.commandId, key);
+				await mdb.markRemovalRecorded(c, r.tenantId, r.commandId);
+				return "known";
+			}
+			const f = await mdb.getFact(c, r.factId, true);
+			if (f && f.tenantId !== r.tenantId) throw new RemovalError("a removal record names another tenant's fact");
+			if (await mdb.decisionByCommand(c, r.tenantId, r.commandId))
+				throw new RemovalError("a removal record's command names another decision");
+			if (!(await mdb.insertRestoredRemoval(c, r, key))) return "known";
+			if (!f) return "absent";
+			const next = restoredRemoval(f, r);
+			if (!next) return "held";
+			if ((await mdb.updateFact(c, next, f.revision)) !== 1) throw new Error("the fact changed under the lock");
+			await mdb.insertDecision(c, {
+				decisionId: `${f.factId}-r${next.revision}`,
+				factId: f.factId,
+				tenantId: f.tenantId,
+				fromRevision: f.revision,
+				toRevision: next.revision,
+				decision: r.decision,
+				decider: r.decider,
+				authority: "user",
+				policyRevision: "",
+				reasonCode: r.reasonCode,
+				sourceRefs: f.sourceRefs,
+				expiresAt: f.expiresAt,
+				commandId: r.commandId,
+				requestDigest: r.requestDigest,
+			});
+			if (r.decision === "revoke" || f.state === "confirmed")
+				await db.publishOutbox(
+					c,
+					memoryFactEvent(next, r.decision === "delete" ? "deleted" : "revoked", r.commandId, this.clock.now()),
+				);
+			await this.scheduleIn(c, next);
+			if (next.deleted) await mdb.markPurgedIfComplete(c, f.factId);
+			return "restored";
+		});
+		if (outcome !== "known") {
+			if (outcome === "restored") this.metrics.memoryDecisions.inc({ decision: r.decision, origin: "user" });
+			this.log.warn("a removal a database restore erased was re-applied", {
+				factId: r.factId,
+				decision: r.decision,
+				outcome,
+			});
+		}
+		return outcome;
 	}
 
 	// ---------------------------------------------------------------------

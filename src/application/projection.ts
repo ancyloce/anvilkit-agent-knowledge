@@ -66,6 +66,8 @@ const convergeRounds = 4;
 const retryMs = 500;
 
 export class MemoryProjector implements ResultRecords {
+	private open: () => boolean = () => true;
+
 	constructor(
 		private readonly store: db.Store,
 		private readonly tasks: Tasks,
@@ -95,7 +97,16 @@ export class MemoryProjector implements ResultRecords {
 		return task;
 	}
 
+	/**
+	 * P23: while the removal inventory is not reconciled no projection is
+	 * written, so a restored request never applies content a restore revived.
+	 */
+	setGate(open: () => boolean): void {
+		this.open = open;
+	}
+
 	async advance(taskId: string, generation: number, workerId: string, inputDigest: string): Promise<ProjectionAnswer> {
+		if (!this.open()) return { state: "running", retryAfterMs: 1000 };
 		const task = await this.claimed(taskId, generation, workerId, inputDigest);
 		const input = parseProjectionInput(task.input);
 		const at = { factRevision: input.factRevision, epoch: input.epoch };
