@@ -14,6 +14,7 @@ import { Ingest, planOf } from "./application/ingest.js";
 import { Memory } from "./application/memory.js";
 import { MemoryProjector } from "./application/projection.js";
 import { Recall } from "./application/recall.js";
+import { Removals } from "./application/removals.js";
 import { Retrieval } from "./application/retrieval.js";
 import { Snapshots } from "./application/snapshots.js";
 import { Sources } from "./application/sources.js";
@@ -23,6 +24,7 @@ import type { SpaceProfile } from "./domain/index.js";
 import { buildRuntime, Generations, retire } from "./generations.js";
 import { jsonLogger, type Logger } from "./log.js";
 import { Metrics } from "./metrics.js";
+import { Telemetry } from "./telemetry.js";
 import { createGrpcServer } from "./transport/grpc.js";
 import { createHealthServer, listen } from "./transport/health.js";
 
@@ -185,6 +187,24 @@ export async function start(
 		log,
 		metrics,
 	);
+	// P23: removals outlive a restore of the database; memory serves once
+	// the removal inventory is reconciled.
+	const removals = new Removals(
+		store,
+		() => gens.runtime()?.removals,
+		() => active().removals,
+		systemClock,
+		log,
+		metrics,
+	);
+	memory.setRemovals(removals);
+	recall.setGate(() => removals.ready());
+	projector.setGate(() => removals.ready());
+	if (!cfg.removals.endpoint)
+		log.warn(
+			"no removal inventory: memory deletions and revocations are not preserved across a database restore (removals.endpoint unset)",
+		);
+	const telemetry = new Telemetry(cfg.telemetry, "anvilkit-agent-knowledge");
 	const grpc = createGrpcServer(
 		cfg.grpc.listen,
 		cfg.grpc.capacity,
@@ -198,6 +218,7 @@ export async function start(
 		memory,
 		projector,
 		recall,
+		telemetry,
 	);
 	let sweeper: NodeJS.Timeout | undefined;
 	let reconciler: NodeJS.Timeout | undefined;
@@ -216,16 +237,38 @@ export async function start(
 				await tasks.observe(cfg.outbox.consumerGroup);
 			});
 		}, cfg.tasks.sweepIntervalMs);
-		reconciler = setInterval(() => {
+		const reconcile = () => {
 			reconciling = reconciling.then(() =>
 				indexer
 					.reconcile()
 					.catch((err) => log.warn("index reconciliation failed", { error: String(err) }))
-					.then(() => memory.expireDue(100))
-					.then(() => projector.reconcile())
+					.then(() => removals.tick())
+					.catch((err) =>
+						log.warn("removal inventory not reconciled", {
+							error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+							memory: removals.ready() ? "serving" : "closed",
+						}),
+					)
+					.then(async () => {
+						if (!removals.ready()) return;
+						await memory.expireDue(100);
+						await projector.reconcile();
+					})
 					.catch((err) => log.warn("memory reconciliation failed", { error: String(err) })),
 			);
-		}, cfg.index.qualifyIntervalMs);
+		};
+		// The first removal pass runs before serving, within a bound: memory
+		// opens with the service when the inventory answers, and stays closed
+		// (everything else serving) until a later pass completes when not.
+		reconciling = removals.tick().then(
+			() => undefined,
+			(err) =>
+				log.warn("removal inventory not reconciled at start: memory is closed", {
+					error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+				}),
+		);
+		await Promise.race([reconciling, new Promise<void>((r) => setTimeout(r, 2 * cfg.removals.timeoutMs).unref())]);
+		reconciler = setInterval(reconcile, cfg.index.qualifyIntervalMs);
 		watcher = setInterval(() => {
 			watching = watching.then(() =>
 				gens.reload().then(
@@ -280,6 +323,7 @@ export async function start(
 			if (forcedServer || forcedDrain) metrics.forcedStop.set(1);
 			log.info("knowledge stopped", { drainSeconds: (Date.now() - begin) / 1000, forced: forcedServer || forcedDrain });
 			await new Promise<void>((r) => health.close(() => r()));
+			await telemetry.shutdown().catch((err) => log.error("span flush failed", { error: String(err) }));
 			resolveDone();
 		})();
 		return stopping;
