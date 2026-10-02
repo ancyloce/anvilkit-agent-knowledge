@@ -16,7 +16,7 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
-    "@anvilkit/generated-clients": "github:ancyloce/anvilkit-agent-contracts#ffe05d5511bd646b8b6ae483616c3a9d26373404&path:ts",
+    "@anvilkit/generated-clients": "github:ancyloce/anvilkit-agent-contracts#063f91f2bfa2cdb46403638d3e3d23dfcc956303&path:ts",
     "@aws-sdk/client-s3": "3.1134.0",
     "@aws-sdk/s3-request-presigner": "3.1134.0",
     "@bufbuild/protobuf": "2.15.0",
@@ -25,6 +25,11 @@
     "@langchain/core": "1.2.13",
     "@langchain/langgraph-checkpoint": "1.1.5",
     "@langchain/langgraph-checkpoint-postgres": "1.0.5",
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/core": "2.11.0",
+    "@opentelemetry/exporter-trace-otlp-http": "0.222.0",
+    "@opentelemetry/resources": "2.11.0",
+    "@opentelemetry/sdk-trace": "2.11.0",
     "@qdrant/js-client-rest": "1.19.0",
     "ajv": "8.20.0",
     "grpc-health-check": "2.1.0",
