@@ -13,6 +13,7 @@ import { type MemoryStorePort, PostgresMemoryStore } from "./adapters/memorystor
 import { type ObjectStore, S3Objects } from "./adapters/objects.js";
 import { newPool, type Store } from "./adapters/postgres.js";
 import { QdrantIndex, type VectorIndex } from "./adapters/qdrant.js";
+import { type RemovalInventory, S3RemovalInventory } from "./adapters/removals.js";
 import type { Tasks } from "./application/tasks.js";
 import { type Generation, inputsOf, loadFrom } from "./config.js";
 import type { Logger } from "./log.js";
@@ -28,6 +29,8 @@ export interface Runtime {
 	vectors?: VectorIndex;
 	/** P17: the PostgresStore projection (its own pool under the Store role). */
 	memoryStore?: MemoryStorePort;
+	/** P23: the removal inventory in the independent DR store. */
+	removals?: RemovalInventory;
 }
 
 /**
@@ -78,6 +81,17 @@ export async function buildRuntime(gen: Generation): Promise<Runtime> {
 			})
 		: undefined;
 	const memoryStore = c.store.url ? new PostgresMemoryStore(c.store.url, c.store.schema, c.store.maxConn) : undefined;
+	const rm = c.removals;
+	const removals = rm.endpoint
+		? new S3RemovalInventory({
+				endpoint: rm.endpoint,
+				bucket: rm.bucket,
+				region: rm.region,
+				accessKeyId: rm.accessKeyId,
+				secretAccessKey: rm.secretAccessKey,
+				timeoutMs: rm.timeoutMs,
+			})
+		: undefined;
 	const pool = newPool(gen.config.database.url, gen.config.database.maxConn);
 	try {
 		const client = await pool.connect();
@@ -90,10 +104,11 @@ export async function buildRuntime(gen: Generation): Promise<Runtime> {
 		await pool.end().catch(() => undefined);
 		await memoryStore?.close().catch(() => undefined);
 		objects?.close();
+		removals?.close();
 		kube?.close();
 		throw new Error(`database probe: ${err instanceof Error ? err.message : String(err)}`);
 	}
-	return { gen, pool, objects, kube, parser, inference, vectors, memoryStore };
+	return { gen, pool, objects, kube, parser, inference, vectors, memoryStore, removals };
 }
 
 /** Drains the pool within the limit; reports whether the limit cut it short. */
@@ -109,6 +124,7 @@ export async function retire(rt: Runtime, limitMs: number): Promise<boolean> {
 	rt.objects?.close();
 	rt.kube?.close();
 	rt.vectors?.close();
+	rt.removals?.close();
 	await rt.memoryStore?.close().catch(() => undefined);
 	return forced;
 }
