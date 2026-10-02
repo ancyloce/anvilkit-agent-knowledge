@@ -19,6 +19,8 @@ export const defaultConfigFile = "config.yaml";
 export interface Config {
 	grpc: { listen: string; capacity: number; shutdownTimeoutMs: number };
 	health: { listen: string };
+	/** Spans over OTLP/HTTP to the collector when placed (none otherwise), sampled at sampleRatio; read at process start. */
+	telemetry: { otlpEndpoint: string; sampleRatio: number };
 	database: { url: string; urlFile: string; maxConn: number };
 	tasks: {
 		maxInputBytes: number;
@@ -91,6 +93,22 @@ export interface Config {
 	};
 	store: { url: string; schema: string; maxConn: number };
 	memory: { maxAllowedFacts: number; maxProjectionEpochs: number; retryDelayMs: number };
+	/**
+	 * The removal inventory in the independent DR store (P23): its own
+	 * bucket and bucket-limited credentials; unplaced, deletions and
+	 * revocations are not preserved across a database restore.
+	 */
+	removals: {
+		endpoint: string;
+		bucket: string;
+		region: string;
+		accessKeyId: string;
+		secretAccessKey: string;
+		credentialsFile: string;
+		timeoutMs: number;
+		windowMarginMs: number;
+		reconcileIntervalMs: number;
+	};
 	apollo: { mode: "disabled" | "snapshot"; snapshotFile: string; appId: string };
 	reload: { intervalMs: number; drainLimitMs: number };
 }
@@ -119,6 +137,7 @@ export function parseDuration(text: unknown, key: string): number {
 const envOverrides: Record<string, string> = {
 	ANVILKIT_KNOWLEDGE_LISTEN: "grpc.listen",
 	ANVILKIT_KNOWLEDGE_HEALTH_LISTEN: "health.listen",
+	ANVILKIT_KNOWLEDGE_TELEMETRY_OTLP_ENDPOINT: "telemetry.otlp_endpoint",
 	ANVILKIT_KNOWLEDGE_DATABASE_URL: "database.url",
 	ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE: "database.url_file",
 	ANVILKIT_KNOWLEDGE_CONTROL_ADDRESS: "control.address",
@@ -134,6 +153,10 @@ const envOverrides: Record<string, string> = {
 	ANVILKIT_KNOWLEDGE_QDRANT_URL: "qdrant.url",
 	ANVILKIT_KNOWLEDGE_QDRANT_API_KEY: "qdrant.api_key",
 	ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL: "store.url",
+	ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT: "removals.endpoint",
+	ANVILKIT_KNOWLEDGE_REMOVALS_ACCESS_KEY_ID: "removals.access_key_id",
+	ANVILKIT_KNOWLEDGE_REMOVALS_SECRET_ACCESS_KEY: "removals.secret_access_key",
+	ANVILKIT_KNOWLEDGE_REMOVALS_CREDENTIALS_FILE: "removals.credentials_file",
 };
 
 const secretKeys = [
@@ -142,8 +165,11 @@ const secretKeys = [
 	"objects.secret_access_key",
 	"qdrant.api_key",
 	"store.url",
+	"removals.access_key_id",
+	"removals.secret_access_key",
 ];
 const placementKeys = [
+	"telemetry.otlp_endpoint",
 	"database.url_file",
 	"control.address",
 	"apollo.snapshot_file",
@@ -154,6 +180,8 @@ const placementKeys = [
 	"parser.image_registry",
 	"inference.url",
 	"qdrant.url",
+	"removals.endpoint",
+	"removals.credentials_file",
 ];
 
 type Raw = Record<string, unknown>;
@@ -188,6 +216,7 @@ function set(raw: Raw, path: string, value: unknown): void {
 const defaults: Raw = {
 	grpc: { listen: "127.0.0.1:9105", capacity: 64, shutdown_timeout: "20s" },
 	health: { listen: "127.0.0.1:9115" },
+	telemetry: { sample_ratio: 1 },
 	database: { max_conn: 8 },
 	tasks: { max_input_bytes: 65536, max_lease: "10m", retry_delay: "5s", max_attempts: 3, sweep_interval: "2s" },
 	outbox: { consumer_group: "anvilkit-agent-knowledge-forwarder" },
@@ -241,11 +270,20 @@ const defaults: Raw = {
 	},
 	store: { schema: "memory_store", max_conn: 4 },
 	memory: { max_allowed_facts: 1024, max_projection_epochs: 5, retry_delay: "30s" },
+	removals: {
+		bucket: "anvilkit-memory-removals",
+		region: "us-east-1",
+		timeout: "10s",
+		window_margin: "5m",
+		reconcile_interval: "30s",
+	},
 	apollo: { mode: "disabled", app_id: "anvilkit-agent-knowledge" },
 	reload: { interval: "2s", drain_limit: "30s" },
 };
 
 const known = new Set([
+	"telemetry.otlp_endpoint",
+	"telemetry.sample_ratio",
 	"grpc.listen",
 	"grpc.capacity",
 	"grpc.shutdown_timeout",
@@ -315,6 +353,15 @@ const known = new Set([
 	"memory.max_allowed_facts",
 	"memory.max_projection_epochs",
 	"memory.retry_delay",
+	"removals.endpoint",
+	"removals.bucket",
+	"removals.region",
+	"removals.access_key_id",
+	"removals.secret_access_key",
+	"removals.credentials_file",
+	"removals.timeout",
+	"removals.window_margin",
+	"removals.reconcile_interval",
 	"apollo.mode",
 	"apollo.snapshot_file",
 	"apollo.app_id",
@@ -512,6 +559,7 @@ export function loadFrom(path: string, environ: NodeJS.ProcessEnv, number: numbe
 				`kubeconfig=${cfg.parser.kubeconfig ? fileDigest(cfg.parser.kubeconfig) : ""}`,
 				`qdrant=${cfg.qdrant.apiKey}`,
 				`store=${cfg.store.url}`,
+				`removals=${cfg.removals.accessKeyId}:${cfg.removals.secretAccessKey}`,
 			].join("\n"),
 		),
 		profiles: { "local-check-v1": digestOf("local-check-v1") },
@@ -548,6 +596,22 @@ function duration(raw: Raw, key: string, min: number, max: number): number {
 
 const listenPattern = /^[^:\s]+:\d{1,5}$/;
 
+/** KEY=VALUE lines of a mounted credentials file; only the two credential names are read. */
+function credentialsFrom(file: string, key: string, have: { id: string; secret: string }, errors: string[]) {
+	if (!file || (have.id && have.secret)) return have;
+	let { id, secret } = have;
+	try {
+		for (const line of readFileSync(file, "utf8").split("\n")) {
+			const m = /^([A-Z_]+)=(.*)$/.exec(line.trim());
+			if (m?.[1]?.endsWith("ACCESS_KEY_ID")) id ||= m[2] ?? "";
+			else if (m?.[1]?.endsWith("SECRET_ACCESS_KEY")) secret ||= m[2] ?? "";
+		}
+	} catch (err) {
+		errors.push(`${key}: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	return { id, secret };
+}
+
 function validate(raw: Raw): Config {
 	const errors: string[] = [];
 	const attempt = <T>(fn: () => T, fallback: T): T => {
@@ -560,6 +624,11 @@ function validate(raw: Raw): Config {
 	};
 	const listen = attempt(() => str(raw, "grpc.listen"), "");
 	if (!listenPattern.test(listen)) errors.push("grpc.listen must be host:port");
+	const otlpEndpoint = attempt(() => str(raw, "telemetry.otlp_endpoint"), "");
+	if (otlpEndpoint && !/^https?:\/\/[^\s/]+(\/[^\s]*)?$/.test(otlpEndpoint))
+		errors.push("telemetry.otlp_endpoint must be an http(s) URL of the collector");
+	const sampleRatio = Number(get(raw, "telemetry.sample_ratio"));
+	if (!(sampleRatio >= 0 && sampleRatio <= 1)) errors.push("telemetry.sample_ratio must be within [0, 1]");
 	const health = attempt(() => str(raw, "health.listen"), "");
 	if (!listenPattern.test(health)) errors.push("health.listen must be host:port");
 	let url = attempt(() => str(raw, "database.url"), "");
@@ -579,21 +648,18 @@ function validate(raw: Raw): Config {
 	if (sweep >= maxLease) errors.push("tasks.sweep_interval must be shorter than tasks.max_lease");
 	const mode = attempt(() => str(raw, "apollo.mode"), "disabled");
 	if (mode !== "disabled" && mode !== "snapshot") errors.push("apollo.mode must be disabled or snapshot");
-	let accessKeyId = attempt(() => str(raw, "objects.access_key_id"), "");
-	let secretAccessKey = attempt(() => str(raw, "objects.secret_access_key"), "");
 	const credentialsFile = attempt(() => str(raw, "objects.credentials_file"), "");
-	if (credentialsFile && (!accessKeyId || !secretAccessKey)) {
-		// KEY=VALUE lines; only the two credential names are read.
-		try {
-			for (const line of readFileSync(credentialsFile, "utf8").split("\n")) {
-				const m = /^([A-Z_]+)=(.*)$/.exec(line.trim());
-				if (m?.[1]?.endsWith("ACCESS_KEY_ID")) accessKeyId ||= m[2] ?? "";
-				else if (m?.[1]?.endsWith("SECRET_ACCESS_KEY")) secretAccessKey ||= m[2] ?? "";
-			}
-		} catch (err) {
-			errors.push(`objects.credentials_file: ${err instanceof Error ? err.message : String(err)}`);
-		}
-	}
+	const objectsCredentials = credentialsFrom(
+		credentialsFile,
+		"objects.credentials_file",
+		{
+			id: attempt(() => str(raw, "objects.access_key_id"), ""),
+			secret: attempt(() => str(raw, "objects.secret_access_key"), ""),
+		},
+		errors,
+	);
+	const accessKeyId = objectsCredentials.id;
+	const secretAccessKey = objectsCredentials.secret;
 	const objectsEndpoint = attempt(() => str(raw, "objects.endpoint"), "");
 	if (objectsEndpoint && !/^https?:\/\//.test(objectsEndpoint)) errors.push("objects.endpoint must be an HTTP(S) URL");
 	if (objectsEndpoint && (!accessKeyId || !secretAccessKey))
@@ -613,6 +679,21 @@ function validate(raw: Raw): Config {
 	const consistency = attempt(() => str(raw, "qdrant.read_consistency"), "all");
 	if (!["all", "majority", "quorum"].includes(consistency))
 		errors.push("qdrant.read_consistency must be all, majority or quorum");
+	const removalsEndpoint = attempt(() => str(raw, "removals.endpoint"), "");
+	if (removalsEndpoint && !/^https?:\/\//.test(removalsEndpoint))
+		errors.push("removals.endpoint must be an HTTP(S) URL");
+	const removalsCredentialsFile = attempt(() => str(raw, "removals.credentials_file"), "");
+	const removalsCredentials = credentialsFrom(
+		removalsCredentialsFile,
+		"removals.credentials_file",
+		{
+			id: attempt(() => str(raw, "removals.access_key_id"), ""),
+			secret: attempt(() => str(raw, "removals.secret_access_key"), ""),
+		},
+		errors,
+	);
+	if (removalsEndpoint && (!removalsCredentials.id || !removalsCredentials.secret))
+		errors.push("removals credentials are required with removals.endpoint");
 	const storeUrl = attempt(() => str(raw, "store.url"), "");
 	if (storeUrl && !/^postgres(ql)?:\/\//.test(storeUrl)) errors.push("store.url must be a postgres URL");
 	const minScoreText = attempt(() => str(raw, "retrieval.min_rerank_score"), "0");
@@ -626,6 +707,7 @@ function validate(raw: Raw): Config {
 			shutdownTimeoutMs: attempt(() => duration(raw, "grpc.shutdown_timeout", 1, 300_000), 20_000),
 		},
 		health: { listen: health },
+		telemetry: { otlpEndpoint, sampleRatio },
 		database: { url, urlFile, maxConn: attempt(() => int(raw, "database.max_conn", 1, 256), 8) },
 		tasks: {
 			maxInputBytes: attempt(() => int(raw, "tasks.max_input_bytes", 1, 65536), 65536),
@@ -711,6 +793,17 @@ function validate(raw: Raw): Config {
 			maxProjectionEpochs: attempt(() => int(raw, "memory.max_projection_epochs", 1, 100), 5),
 			retryDelayMs: attempt(() => duration(raw, "memory.retry_delay", 0, 3_600_000), 30_000),
 		},
+		removals: {
+			endpoint: removalsEndpoint,
+			bucket: attempt(() => str(raw, "removals.bucket"), ""),
+			region: attempt(() => str(raw, "removals.region"), ""),
+			accessKeyId: removalsCredentials.id,
+			secretAccessKey: removalsCredentials.secret,
+			credentialsFile: removalsCredentialsFile,
+			timeoutMs: attempt(() => duration(raw, "removals.timeout", 100, 120_000), 10_000),
+			windowMarginMs: attempt(() => duration(raw, "removals.window_margin", 0, 86_400_000), 300_000),
+			reconcileIntervalMs: attempt(() => duration(raw, "removals.reconcile_interval", 1000, 3_600_000), 30_000),
+		},
 		apollo: {
 			mode: mode as "disabled" | "snapshot",
 			snapshotFile: attempt(() => str(raw, "apollo.snapshot_file"), ""),
@@ -726,6 +819,15 @@ function validate(raw: Raw): Config {
 	if (!/^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/.test(cfg.parser.namespace))
 		errors.push("parser.namespace is not a namespace");
 	if (!cfg.objects.bucket) errors.push("objects.bucket is required");
+	if (!cfg.removals.bucket) errors.push("removals.bucket is required");
+	if (
+		cfg.removals.endpoint &&
+		cfg.removals.endpoint === cfg.objects.endpoint &&
+		cfg.removals.bucket === cfg.objects.bucket
+	)
+		errors.push(
+			"removals.bucket must not be the objects bucket (the removal inventory is independent of the data it outlives)",
+		);
 	if (!/^[a-z][a-z0-9_]{0,62}$/.test(cfg.store.schema)) errors.push("store.schema must be a plain identifier");
 	if (cfg.qdrant.writeConsistencyFactor > cfg.qdrant.replicationFactor)
 		errors.push("qdrant.write_consistency_factor must not exceed qdrant.replication_factor");
