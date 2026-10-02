@@ -29,6 +29,8 @@ export class Metrics {
 	readonly memoryDecisions: Counter<"decision" | "origin">;
 	readonly memoryProjections: Counter<"target" | "outcome">;
 	readonly recalls: Counter<"outcome">;
+	readonly memoryRemovals: Counter<"outcome">;
+	readonly memoryRemovalsReconciled: Gauge;
 
 	constructor(registry: Registry) {
 		const r = [registry];
@@ -176,6 +178,17 @@ export class Metrics {
 			name: "anvilkit_knowledge_memory_recalls_total",
 			help: "Memory recalls by outcome (answered, no_answer, refused, failed).",
 			labelNames: ["outcome"],
+			registers: r,
+		});
+		this.memoryRemovals = new Counter({
+			name: "anvilkit_knowledge_memory_removals_total",
+			help: "Removal inventory records by outcome (recorded, uncertain, conflict, restored).",
+			labelNames: ["outcome"],
+			registers: r,
+		});
+		this.memoryRemovalsReconciled = new Gauge({
+			name: "anvilkit_knowledge_memory_removals_reconciled",
+			help: "1 while memory serves (the removal inventory is reconciled or unplaced), 0 while it is closed.",
 			registers: r,
 		});
 	}
