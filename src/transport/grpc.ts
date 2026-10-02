@@ -5,6 +5,7 @@
 // generated descriptors) before its handler; domain errors map to the
 // public codes of contracts.md §4. The listener is plaintext
 // (DEVELOPMENT_ONLY; workload mTLS is ENV-03), like the other new services.
+
 import {
 	AccessEntry,
 	AdvanceIndexRequest,
@@ -101,6 +102,7 @@ import { ParseError } from "../domain/parse.js";
 import { type Snapshot as DomainSnapshot, RetrievalError } from "../domain/retrieval.js";
 import * as domain from "../domain/source.js";
 import { type Task, TaskError } from "../domain/task.js";
+import type { RpcObserver } from "../telemetry.js";
 
 const stateOf: Record<Task["state"], TaskState> = {
 	pending: TaskState.TASK_STATE_PENDING,
@@ -404,6 +406,7 @@ export function createGrpcServer(
 	memory?: Memory,
 	projector?: MemoryProjector,
 	recall?: Recall,
+	observer?: RpcObserver,
 ): GrpcServer {
 	const server = new Server();
 	const health = new HealthImplementation({ "": "NOT_SERVING" });
@@ -414,7 +417,12 @@ export function createGrpcServer(
 		toJson: (r: Req) => unknown,
 		fn: (r: Req) => Promise<Res>,
 	): ((call: ServerUnaryCall<Req, Res>, cb: sendUnaryData<Res>) => void) => {
-		return (call, cb) => {
+		return (call, sendReply) => {
+			const end = observer?.rpc(typeName, call.metadata.get("traceparent")[0]?.toString());
+			const cb: sendUnaryData<Res> = (err, value) => {
+				end?.(err ? ((err as { code?: number }).code ?? status.UNKNOWN) : status.OK);
+				sendReply(err, value);
+			};
 			if (inFlight >= capacity) {
 				cb(
 					Object.assign(new Error("CAPACITY_EXHAUSTED"), {
