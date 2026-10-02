@@ -1,10 +1,11 @@
-// The reviewed statements of MemoryFact, its append-only decisions and its
-// projection ledger (migrations 00001/00005). Visibility and recallability
+// The reviewed statements of MemoryFact, its append-only decisions, its
+// projection ledger and its removal rows (migrations 00001/00005/00007). Visibility and recallability
 // are the domain rules of domain/memory.ts evaluated in SQL so a listing or
 // a recall's allowed set is computed by the authority, never by a cache,
 // the Store or Qdrant. Nothing here reads the Store or Qdrant.
 import type pg from "pg";
 import type { Fact, FactOrigin, FactState, ProjectionAction, SubjectType } from "../domain/memory.js";
+import type { RemovalDecision, RemovalRecord } from "../domain/removal.js";
 import type { PoolClient } from "./postgres.js";
 
 type Queryable = pg.Pool | PoolClient;
@@ -470,4 +471,183 @@ export async function markPurgedIfComplete(c: PoolClient, factId: string): Promi
 		[factId],
 	);
 	return (r.rowCount ?? 0) === 1;
+}
+
+// ---------------------------------------------------------------------------
+// Removal rows (00007): the database's view of its removal inventory
+// ---------------------------------------------------------------------------
+
+export type RemovalState = "pending" | "recorded" | "restored";
+
+export interface RemovalRow {
+	record: RemovalRecord;
+	inventoryKey: string | null;
+	state: RemovalState;
+}
+
+interface RemovalDbRow {
+	tenant_id: string;
+	command_id: string;
+	fact_id: string;
+	decision: RemovalDecision;
+	decider: string;
+	confirmer: string;
+	reason_code: string;
+	request_digest: string;
+	from_revision: string;
+	to_revision: string;
+	recorded_at: Date;
+	inventory_key: string | null;
+	state: RemovalState;
+}
+
+const removalColumns = `tenant_id, command_id, fact_id, decision, decider, confirmer, reason_code, request_digest,
+	from_revision::text AS from_revision, to_revision::text AS to_revision, recorded_at, inventory_key, state`;
+
+function removalOf(x: RemovalDbRow): RemovalRow {
+	return {
+		record: {
+			schemaVersion: 1,
+			kind: "memory-removal",
+			tenantId: x.tenant_id,
+			commandId: x.command_id,
+			requestDigest: x.request_digest,
+			factId: x.fact_id,
+			decision: x.decision,
+			decider: x.decider,
+			confirmer: x.confirmer,
+			reasonCode: x.reason_code,
+			fromRevision: Number(x.from_revision),
+			toRevision: Number(x.to_revision),
+			// recorded_at is held at millisecond precision (the table checks it).
+			recordedAt: x.recorded_at.toISOString(),
+		},
+		inventoryKey: x.inventory_key,
+		state: x.state,
+	};
+}
+
+/** The database's removal scope: the namespace of its records in the inventory (00007). */
+export async function removalScope(c: Queryable): Promise<string> {
+	const r = await c.query<{ scope_id: string }>("SELECT scope_id::text AS scope_id FROM memory_removal_scope");
+	const scope = r.rows[0]?.scope_id;
+	if (!scope || r.rows.length !== 1) throw new Error("the database has no removal scope (migration 00007)");
+	return scope;
+}
+
+/** The database time a removal commits under, at the precision its record keeps. */
+export async function removalTime(c: PoolClient): Promise<Date> {
+	const r = await c.query<{ t: Date }>("SELECT date_trunc('milliseconds', clock_timestamp()) AS t");
+	return (r.rows[0] as { t: Date }).t;
+}
+
+/** Records a removal decision of the caller's transaction (pending until its inventory record is confirmed). */
+export async function insertRemoval(c: PoolClient, r: RemovalRecord, key: string): Promise<void> {
+	await c.query(
+		`INSERT INTO memory_removals (tenant_id, command_id, fact_id, decision, decider, confirmer, reason_code, request_digest,
+		   from_revision, to_revision, recorded_at, inventory_key, state)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending')`,
+		[
+			r.tenantId,
+			r.commandId,
+			r.factId,
+			r.decision,
+			r.decider,
+			r.confirmer,
+			r.reasonCode,
+			r.requestDigest,
+			r.fromRevision,
+			r.toRevision,
+			r.recordedAt,
+			key,
+		],
+	);
+}
+
+/** Records a removal re-applied from the inventory; false when another pass recorded it first. */
+export async function insertRestoredRemoval(c: PoolClient, r: RemovalRecord, key: string): Promise<boolean> {
+	const res = await c.query(
+		`INSERT INTO memory_removals (tenant_id, command_id, fact_id, decision, decider, confirmer, reason_code, request_digest,
+		   from_revision, to_revision, recorded_at, inventory_key, state)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'restored')
+		 ON CONFLICT DO NOTHING`,
+		[
+			r.tenantId,
+			r.commandId,
+			r.factId,
+			r.decision,
+			r.decider,
+			r.confirmer,
+			r.reasonCode,
+			r.requestDigest,
+			r.fromRevision,
+			r.toRevision,
+			r.recordedAt,
+			key,
+		],
+	);
+	return (res.rowCount ?? 0) === 1;
+}
+
+export async function removalByCommand(
+	c: Queryable,
+	tenantId: string,
+	commandId: string,
+	forUpdate = false,
+): Promise<RemovalRow | undefined> {
+	const r = await c.query<RemovalDbRow>(
+		`SELECT ${removalColumns} FROM memory_removals WHERE tenant_id = $1 AND command_id = $2${forUpdate ? " FOR UPDATE" : ""}`,
+		[tenantId, commandId],
+	);
+	return r.rows[0] ? removalOf(r.rows[0]) : undefined;
+}
+
+/** Whether a fact was ever removed (a deletion or revocation row, restored ones included). */
+export async function factRemoved(c: Queryable, factId: string): Promise<boolean> {
+	const r = await c.query("SELECT 1 FROM memory_removals WHERE fact_id = $1 LIMIT 1", [factId]);
+	return (r.rowCount ?? 0) > 0;
+}
+
+/** Binds the inventory key of a pending row that has none yet (removals recorded before 00007). */
+export async function setRemovalKey(c: Queryable, tenantId: string, commandId: string, key: string): Promise<void> {
+	await c.query(
+		`UPDATE memory_removals SET inventory_key = $3, updated_at = now()
+		 WHERE tenant_id = $1 AND command_id = $2 AND inventory_key IS NULL`,
+		[tenantId, commandId, key],
+	);
+}
+
+export async function markRemovalRecorded(c: Queryable, tenantId: string, commandId: string): Promise<void> {
+	await c.query(
+		`UPDATE memory_removals SET state = 'recorded', updated_at = now()
+		 WHERE tenant_id = $1 AND command_id = $2 AND state = 'pending' AND inventory_key IS NOT NULL`,
+		[tenantId, commandId],
+	);
+}
+
+/** Pending rows whose inline record write is overdue (database time), oldest first. */
+export async function pendingRemovals(c: Queryable, olderThanMs: number, limit: number): Promise<RemovalRow[]> {
+	const r = await c.query<RemovalDbRow>(
+		`SELECT ${removalColumns} FROM memory_removals
+		 WHERE state = 'pending' AND updated_at <= now() - make_interval(secs => $1::float8 / 1000)
+		 ORDER BY updated_at, tenant_id, command_id LIMIT $2`,
+		[olderThanMs, limit],
+	);
+	return r.rows.map(removalOf);
+}
+
+/** The newest removal the database knows: where a restore's lost window can begin. */
+export async function removalWatermark(c: Queryable): Promise<Date | undefined> {
+	const r = await c.query<{ t: Date | null }>("SELECT max(recorded_at) AS t FROM memory_removals");
+	return r.rows[0]?.t ?? undefined;
+}
+
+/** The listed keys the database already has a row for. */
+export async function knownRemovalKeys(c: Queryable, keys: string[]): Promise<Set<string>> {
+	if (keys.length === 0) return new Set();
+	const r = await c.query<{ inventory_key: string }>(
+		"SELECT inventory_key FROM memory_removals WHERE inventory_key = ANY($1::text[])",
+		[keys],
+	);
+	return new Set(r.rows.map((x) => x.inventory_key));
 }
