@@ -117,3 +117,19 @@ memory:
   max_allowed_facts: 1024
   max_projection_epochs: 5
   retry_delay: 30s
+# P23: the removal inventory (contracts.md §3, platform.md §6). Every memory
+# deletion and revocation is answered only once its immutable record is in
+# this bucket of the independent DR store (its own user and bucket-limited
+# policy, never the objects bucket); after a restore of anvilkit_knowledge,
+# memory serves again only once every record past the database's newest
+# removal (less window_margin, the commit-order and clock margin) is
+# re-applied. The endpoint and the credentials file are environment-only
+# (ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT, ANVILKIT_KNOWLEDGE_REMOVALS_CREDENTIALS_FILE);
+# unplaced, removals are not preserved across a restore and the service
+# warns. DEVELOPMENT_ONLY bounds.
+removals:
+  bucket: anvilkit-memory-removals
+  region: us-east-1
+  timeout: 10s
+  window_margin: 5m
+  reconcile_interval: 30s
