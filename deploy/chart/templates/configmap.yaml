@@ -7,4 +7,4 @@ metadata:
     {{- include "anvilkit-agent-knowledge.labels" . | nindent 4 }}
 data:
   config.yaml: |
-    {{- toYaml .Values.config | nindent 4 }}
+    {{- include "anvilkit-agent-knowledge.config" . | nindent 4 }}

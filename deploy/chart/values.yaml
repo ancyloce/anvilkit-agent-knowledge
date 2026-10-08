@@ -31,11 +31,45 @@ serviceAccount:
   name: ""
   automountServiceAccountToken: false
 
+# The gRPC listener inside the Pod (ANVILKIT_KNOWLEDGE_LISTEN): under
+# identity.mode mtls it is mTLS-only; the kubelet probes the health port.
 listen:
   address: 0.0.0.0
   port: 9105
+# The plaintext HTTP probe listener (/healthz, /readyz, /metrics); never a
+# business endpoint, not exposed by the Service.
 health:
   port: 9115
+
+# The listener's workload identity (P0.1): mtls (the default) serves TLS 1.3
+# with required client certificates verified against the mounted CA bundle
+# and authorizes every RPC by the peer's SPIFFE URI SAN under the reviewed
+# allowlist; the same certificate is the Control client's identity. The
+# certificate is a cert-manager Certificate this chart renders
+# (certificate.create) from issuerRef, or an existing Secret (secretName,
+# keys tls.crt, tls.key, ca.crt); the files are mounted at
+# /etc/anvilkit/identity into the knowledge container and the relay sidecar
+# and reloaded as a whole. development is the plaintext listener of the
+# development foundation and renders only with development.enabled: true.
+identity:
+  mode: mtls
+  trustDomain: ""
+  secretName: ""
+  certificate:
+    create: true
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+      group: cert-manager.io
+    duration: 2160h
+    renewBefore: 720h
+  maxConnectionAge: 1h
+
+# The top-level DEVELOPMENT_ONLY guard: every development transport below
+# (identity.mode, control.identity.mode, inference.tls.mode, nats.tls.mode)
+# renders only while this is true; it downgrades nothing by itself.
+development:
+  enabled: false
 
 # The application-role connection, mounted as a file
 # (ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE) so a rotated secret publishes a new
@@ -45,13 +79,25 @@ database:
     name: ""
     key: url
 
-# The JetStream placement (forwarder and relay). Required.
+# The JetStream placement (forwarder and relay). Required. tls is the
+# forwarder's transport: tls verifies the server against caSecret (key
+# ca.crt), mtls also presents the workload certificate, development is the
+# plaintext JetStream of the development foundation (development.enabled).
 nats:
   url: ""
+  tls:
+    mode: tls
+    caSecret:
+      name: ""
+      key: ca.crt
 
-# The Control placement of the original-dispatch query; optional.
+# The Control placement of the original-dispatch query; optional. The client
+# presents the workload certificate and verifies Control by serverName.
 control:
   address: ""
+  identity:
+    mode: mtls
+    serverName: anvilkit-agent-control
 
 # P15: Knowledge's object store (the anvilkit-knowledge bucket, its own
 # user and bucket-limited policy): the in-cluster endpoint, the endpoint
@@ -87,9 +133,19 @@ parser:
   namespace: anvilkit-parsing
   imageRegistry: ""
 
-# P15: the Inference placement (anvilkit-agent-inference); optional.
+# P15: the Inference placement (anvilkit-agent-inference); optional. tls is
+# its transport: tls verifies the server against caSecret (key ca.crt) by
+# serverName (the URL host by default), mtls also presents the workload
+# certificate, development is plaintext http:// (development.enabled).
+# Server-side TLS of Inference is P0.6.
 inference:
   url: ""
+  tls:
+    mode: tls
+    serverName: ""
+    caSecret:
+      name: ""
+      key: ca.crt
 
 # P16: the Qdrant placement (ANVILKIT_KNOWLEDGE_QDRANT_URL) and, when the
 # cluster requires one, its API key from an existing Secret. The collection's

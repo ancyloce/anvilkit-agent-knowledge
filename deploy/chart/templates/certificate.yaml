@@ -1,0 +1,32 @@
+{{- include "anvilkit-agent-knowledge.require" . -}}
+{{- if and (eq .Values.identity.mode "mtls") .Values.identity.certificate.create }}
+# The workload certificate (P0.1): CN and DNS SANs name the Service for the
+# clients' hostname verification; the URI SAN is the identity the servers
+# authorize (spiffe://<trustDomain>/ns/<namespace>/sa/<service-account>).
+# The relay sidecar of this Pod presents the same certificate: it is the
+# Pod's workload. cert-manager rotates it; the processes reload the files.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "anvilkit-agent-knowledge.fullname" . }}-identity
+  labels:
+    {{- include "anvilkit-agent-knowledge.labels" . | nindent 4 }}
+spec:
+  commonName: {{ include "anvilkit-agent-knowledge.name" . }}
+  secretName: {{ include "anvilkit-agent-knowledge.identitySecret" . }}
+  duration: {{ .Values.identity.certificate.duration }}
+  renewBefore: {{ .Values.identity.certificate.renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [digital signature, key encipherment, server auth, client auth]
+  dnsNames:
+    - {{ include "anvilkit-agent-knowledge.fullname" . }}
+    - {{ include "anvilkit-agent-knowledge.fullname" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "anvilkit-agent-knowledge.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  uris:
+    - spiffe://{{ default "anvilkit.local" .Values.identity.trustDomain }}/ns/{{ .Release.Namespace }}/sa/{{ include "anvilkit-agent-knowledge.serviceAccountName" . }}
+  issuerRef:
+    {{- toYaml .Values.identity.certificate.issuerRef | nindent 4 }}
+{{- end }}

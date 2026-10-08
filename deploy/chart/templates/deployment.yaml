@@ -21,7 +21,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        checksum/config: {{ toYaml .Values.config | sha256sum }}
+        checksum/config: {{ include "anvilkit-agent-knowledge.config" . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -60,6 +60,18 @@ spec:
             # generation (a new pool, probed, then the old one drained).
             - name: ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE
               value: /var/run/secrets/anvilkit/database/{{ .Values.database.secret.key }}
+            {{- if eq .Values.identity.mode "mtls" }}
+            - name: ANVILKIT_KNOWLEDGE_IDENTITY_CERT_FILE
+              value: /etc/anvilkit/identity/tls.crt
+            - name: ANVILKIT_KNOWLEDGE_IDENTITY_KEY_FILE
+              value: /etc/anvilkit/identity/tls.key
+            - name: ANVILKIT_KNOWLEDGE_IDENTITY_CA_FILE
+              value: /etc/anvilkit/identity/ca.crt
+            {{- end }}
+            {{- if .Values.identity.trustDomain }}
+            - name: ANVILKIT_KNOWLEDGE_IDENTITY_TRUST_DOMAIN
+              value: {{ .Values.identity.trustDomain | quote }}
+            {{- end }}
             {{- if .Values.control.address }}
             - name: ANVILKIT_KNOWLEDGE_CONTROL_ADDRESS
               value: {{ .Values.control.address | quote }}
@@ -144,6 +156,16 @@ spec:
             - name: database
               mountPath: /var/run/secrets/anvilkit/database
               readOnly: true
+            {{- if eq .Values.identity.mode "mtls" }}
+            - name: identity
+              mountPath: /etc/anvilkit/identity
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.inference.url (ne .Values.inference.tls.mode "development") }}
+            - name: inference-ca
+              mountPath: /etc/anvilkit/inference-ca
+              readOnly: true
+            {{- end }}
             {{- if .Values.objects.endpoint }}
             - name: objects
               mountPath: /var/run/secrets/anvilkit/objects
@@ -177,6 +199,21 @@ spec:
               value: {{ .Values.forwarder.consumerGroup | quote }}
             - name: ANVILKIT_FORWARDER_HEALTH_LISTEN
               value: {{ printf "%s:%d" .Values.listen.address (int .Values.forwarder.healthPort) | quote }}
+            - name: ANVILKIT_FORWARDER_NATS_TLS_MODE
+              value: {{ .Values.nats.tls.mode | quote }}
+            {{- if eq .Values.nats.tls.mode "development" }}
+            - name: ANVILKIT_FORWARDER_DEVELOPMENT_ENABLED
+              value: "true"
+            {{- else }}
+            - name: ANVILKIT_FORWARDER_NATS_TLS_CA_FILE
+              value: /etc/anvilkit/nats-ca/ca.crt
+            {{- end }}
+            {{- if eq .Values.nats.tls.mode "mtls" }}
+            - name: ANVILKIT_FORWARDER_NATS_TLS_CERT_FILE
+              value: /etc/anvilkit/identity/tls.crt
+            - name: ANVILKIT_FORWARDER_NATS_TLS_KEY_FILE
+              value: /etc/anvilkit/identity/tls.key
+            {{- end }}
           ports:
             - name: fwd-health
               containerPort: {{ .Values.forwarder.healthPort }}
@@ -199,6 +236,16 @@ spec:
             - name: forwarder-database
               mountPath: /var/run/secrets/anvilkit/forwarder-database
               readOnly: true
+            {{- if ne .Values.nats.tls.mode "development" }}
+            - name: nats-ca
+              mountPath: /etc/anvilkit/nats-ca
+              readOnly: true
+            {{- end }}
+            {{- if eq .Values.nats.tls.mode "mtls" }}
+            - name: identity
+              mountPath: /etc/anvilkit/identity
+              readOnly: true
+            {{- end }}
         {{- end }}
         {{- if .Values.relay.enabled }}
         - name: relay
@@ -222,6 +269,20 @@ spec:
               value: /var/run/secrets/anvilkit/relay-database/{{ .Values.relay.database.secret.key }}
             - name: ANVILKIT_BACKGROUND_WORKER_QUEUE_URL_FILE
               value: /var/run/secrets/anvilkit/queue/{{ .Values.relay.queue.secret.key }}
+            # P0.1: the relay dials this Pod's BackgroundTaskService with the
+            # Pod's own workload identity and verifies it by the Service name.
+            - name: ANVILKIT_BACKGROUND_WORKER_IDENTITY_MODE
+              value: {{ .Values.identity.mode | quote }}
+            {{- if eq .Values.identity.mode "mtls" }}
+            - name: ANVILKIT_BACKGROUND_WORKER_IDENTITY_CERT_FILE
+              value: /etc/anvilkit/identity/tls.crt
+            - name: ANVILKIT_BACKGROUND_WORKER_IDENTITY_KEY_FILE
+              value: /etc/anvilkit/identity/tls.key
+            - name: ANVILKIT_BACKGROUND_WORKER_IDENTITY_CA_FILE
+              value: /etc/anvilkit/identity/ca.crt
+            - name: ANVILKIT_BACKGROUND_WORKER_OWNER_SERVER_NAME
+              value: {{ include "anvilkit-agent-knowledge.fullname" . | quote }}
+            {{- end }}
           ports:
             - name: relay-health
               containerPort: {{ .Values.relay.healthPort }}
@@ -244,6 +305,11 @@ spec:
             - name: relay-database
               mountPath: /var/run/secrets/anvilkit/relay-database
               readOnly: true
+            {{- if eq .Values.identity.mode "mtls" }}
+            - name: identity
+              mountPath: /etc/anvilkit/identity
+              readOnly: true
+            {{- end }}
             - name: queue
               mountPath: /var/run/secrets/anvilkit/queue
               readOnly: true
@@ -252,6 +318,28 @@ spec:
         - name: config
           configMap:
             name: {{ include "anvilkit-agent-knowledge.fullname" . }}
+        {{- if eq .Values.identity.mode "mtls" }}
+        - name: identity
+          secret:
+            secretName: {{ include "anvilkit-agent-knowledge.identitySecret" . }}
+            defaultMode: 0440
+        {{- end }}
+        {{- if ne .Values.nats.tls.mode "development" }}
+        - name: nats-ca
+          secret:
+            secretName: {{ .Values.nats.tls.caSecret.name }}
+            items:
+              - key: {{ .Values.nats.tls.caSecret.key }}
+                path: ca.crt
+        {{- end }}
+        {{- if and .Values.inference.url (ne .Values.inference.tls.mode "development") }}
+        - name: inference-ca
+          secret:
+            secretName: {{ .Values.inference.tls.caSecret.name }}
+            items:
+              - key: {{ .Values.inference.tls.caSecret.key }}
+                path: ca.crt
+        {{- end }}
         - name: database
           secret:
             secretName: {{ .Values.database.secret.name }}
