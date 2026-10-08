@@ -6,6 +6,7 @@
 // reviewed profile expects, or it is refused as stale. Inference is
 // computation only: it never sees a tenant, ACL, source or storage key.
 import { createHash } from "node:crypto";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { components } from "@anvilkit/generated-clients/openapi/inference";
 import { parseStrictJson } from "@anvilkit/generated-clients/validation/json";
 
@@ -65,25 +66,115 @@ export interface Embedded {
 /** What the use cases need from Inference (tests substitute a deterministic double). */
 export type InferencePort = Pick<InferenceClient, "embed" | "rerank">;
 
+/**
+ * The transport of the Inference connection (P0.1): development is the
+ * plaintext http:// of the development foundation (admitted by the
+ * configuration loader only under development.enabled); tls verifies the
+ * server against the CA bundle with standard hostname verification by
+ * serverName (the URL host by default); mtls additionally presents the
+ * workload certificate. The bundle and identity are read per connection,
+ * so a rotation is in force for the next request. Server-side TLS of
+ * Inference itself is P0.6.
+ */
+export type InferenceTransport =
+	| { mode: "development" }
+	| { mode: "tls"; ca: () => Buffer; serverName?: string }
+	| { mode: "mtls"; ca: () => Buffer; identity: () => { cert: Buffer; key: Buffer }; serverName?: string };
+
+interface Answer {
+	status: number;
+	ok: boolean;
+	contentLength: number;
+	bytes(): Promise<Buffer>;
+}
+
 export class InferenceClient {
 	constructor(
 		private readonly url: string,
 		private readonly timeoutMs: number,
 		private readonly profile: InferenceProfile,
 		private readonly maxResponseBytes = 64 << 20,
-	) {}
+		private readonly transport: InferenceTransport = { mode: "development" },
+	) {
+		if (transport.mode === "development" && !url.startsWith("http://"))
+			throw new Error("inference: the development transport is plaintext http:// only");
+		if (transport.mode !== "development" && !url.startsWith("https://"))
+			throw new Error("inference: the tls and mtls transports need an https:// url");
+	}
 
-	private async post(path: string, body: unknown): Promise<unknown> {
-		let res: Response;
-		try {
-			res = await fetch(new URL(`/api/v1/${path}`, this.url), {
+	private async send(path: string, body: string): Promise<Answer> {
+		const target = new URL(`/api/v1/${path}`, this.url);
+		if (this.transport.mode === "development") {
+			const res = await fetch(target, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify(body),
+				body,
 				redirect: "error",
 				signal: AbortSignal.timeout(this.timeoutMs),
 			});
+			return {
+				status: res.status,
+				ok: res.ok,
+				contentLength: Number(res.headers.get("content-length") ?? "0"),
+				bytes: async () => Buffer.from(await res.arrayBuffer()),
+			};
+		}
+		const t = this.transport;
+		const identity = t.mode === "mtls" ? t.identity() : undefined;
+		const agent = new HttpsAgent({
+			keepAlive: false,
+			ca: t.ca(),
+			cert: identity?.cert,
+			key: identity?.key,
+			servername: t.serverName || target.hostname,
+			minVersion: "TLSv1.3",
+		});
+		return new Promise<Answer>((resolve, reject) => {
+			const req = httpsRequest(
+				target,
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+					agent,
+					timeout: this.timeoutMs,
+				},
+				(res) => {
+					const chunks: Buffer[] = [];
+					let total = 0;
+					const collected = new Promise<Buffer>((done, fail) => {
+						res.on("data", (c: Buffer) => {
+							total += c.length;
+							if (total > this.maxResponseBytes) {
+								req.destroy();
+								fail(new InferenceMismatch("response over the bound"));
+								return;
+							}
+							chunks.push(c);
+						});
+						res.on("end", () => done(Buffer.concat(chunks)));
+						res.on("error", fail);
+					});
+					const status = res.statusCode ?? 0;
+					resolve({
+						status,
+						ok: status >= 200 && status < 300,
+						contentLength: Number(res.headers["content-length"] ?? "0"),
+						bytes: () => collected,
+					});
+				},
+			);
+			req.on("timeout", () => req.destroy(new Error("timeout")));
+			req.on("error", reject);
+			req.end(body);
+		});
+	}
+
+	private async post(path: string, body: unknown): Promise<unknown> {
+		let res: Answer;
+		try {
+			res = await this.send(path, JSON.stringify(body));
 		} catch (err) {
+			if (err instanceof InferenceMismatch) throw err;
 			throw new InferenceError(
 				0,
 				"DEPENDENCY_UNAVAILABLE",
@@ -91,9 +182,8 @@ export class InferenceClient {
 				`inference unreachable: ${String(err).slice(0, 200)}`,
 			);
 		}
-		const declared = Number(res.headers.get("content-length") ?? "0");
-		if (declared > this.maxResponseBytes) throw new InferenceMismatch("response over the bound");
-		const bytes = Buffer.from(await res.arrayBuffer());
+		if (res.contentLength > this.maxResponseBytes) throw new InferenceMismatch("response over the bound");
+		const bytes = await res.bytes();
 		if (bytes.length > this.maxResponseBytes) throw new InferenceMismatch("response over the bound");
 		if (!res.ok) {
 			// An error is classified by its status first: an overloaded server

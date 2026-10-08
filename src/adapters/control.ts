@@ -8,7 +8,7 @@ import {
 	GetDispatchRequest,
 } from "@anvilkit/generated-clients/proto/anvilkit/control/v1/dispatch";
 import { validateJson } from "@anvilkit/generated-clients/validation/rpc";
-import { credentials, Metadata } from "@grpc/grpc-js";
+import { type ChannelCredentials, type ChannelOptions, Metadata } from "@grpc/grpc-js";
 import type { DispatchQuery } from "../application/tasks.js";
 import type { DispatchOutcome } from "../domain/task.js";
 
@@ -17,12 +17,18 @@ export const owner = "anvilkit-agent-knowledge";
 export class ControlDispatchQuery implements DispatchQuery {
 	private readonly client: DispatchServiceClient;
 
+	/**
+	 * The transport is the rotating mTLS credential of the workload identity
+	 * with hostname verification against Control's server name, or, under
+	 * the DEVELOPMENT_ONLY guard, the plaintext credential the caller built.
+	 */
 	constructor(
 		address: string,
 		private readonly timeoutMs: number,
+		transport: ChannelCredentials,
+		options: ChannelOptions = {},
 	) {
-		// Plaintext (DEVELOPMENT_ONLY; workload mTLS is ENV-03).
-		this.client = new DispatchServiceClient(address, credentials.createInsecure());
+		this.client = new DispatchServiceClient(address, transport, options);
 	}
 
 	outcome(dispatchId: string): Promise<DispatchOutcome> {
