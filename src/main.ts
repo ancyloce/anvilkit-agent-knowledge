@@ -5,6 +5,7 @@
 // readiness and new admission, drains the server within its bound (forced
 // stop afterwards), stops the loops, records the drain and closes the
 // generation's pool last, with the probe listener after it.
+import { type ChannelCredentials, type ChannelOptions, credentials } from "@grpc/grpc-js";
 import { collectDefaultMetrics, Registry } from "prom-client";
 import { ControlDispatchQuery } from "./adapters/control.js";
 import type { ParserProfile } from "./adapters/jobcontract.js";
@@ -27,6 +28,8 @@ import { Metrics } from "./metrics.js";
 import { Telemetry } from "./telemetry.js";
 import { createGrpcServer } from "./transport/grpc.js";
 import { createHealthServer, listen } from "./transport/health.js";
+import { clientCredentials, clientOptions } from "./transport/identity.js";
+import { policy } from "./transport/policy.js";
 
 export interface Started {
 	stop(): Promise<void>;
@@ -52,8 +55,17 @@ export async function start(
 		);
 	}
 	const store = new Store(rt.pool);
+	// The workload identity (P0.1): one watched set of files feeds the
+	// listener and every mTLS client of this process.
+	const identityWatcher = rt.identity;
+	const controlTransport = (): [ChannelCredentials, ChannelOptions] => {
+		if (cfg.control.identity.mode === "mtls" && identityWatcher)
+			return [clientCredentials(identityWatcher), clientOptions(cfg.control.identity.serverName)];
+		log.warn("DEVELOPMENT_ONLY plaintext Control transport; qualifies no production identity");
+		return [credentials.createInsecure(), {}];
+	};
 	const dispatch = cfg.control.address
-		? new ControlDispatchQuery(cfg.control.address, cfg.control.timeoutMs)
+		? new ControlDispatchQuery(cfg.control.address, cfg.control.timeoutMs, ...controlTransport())
 		: noDispatchQuery;
 	if (!cfg.control.address)
 		log.warn("no Control placement: expired external-effect leases are never reassigned (control.address unset)");
@@ -219,7 +231,17 @@ export async function start(
 		projector,
 		recall,
 		telemetry,
+		identityWatcher && cfg.grpc.identity.mode === "mtls"
+			? {
+					watcher: identityWatcher,
+					trustDomain: cfg.grpc.identity.trustDomain,
+					policy: policy(),
+					maxConnectionAgeMs: cfg.grpc.identity.maxConnectionAgeMs,
+				}
+			: undefined,
 	);
+	if (cfg.grpc.identity.mode !== "mtls")
+		log.warn("DEVELOPMENT_ONLY listener identity: plaintext gRPC, no caller is authenticated or authorized");
 	let sweeper: NodeJS.Timeout | undefined;
 	let reconciler: NodeJS.Timeout | undefined;
 	let reconciling: Promise<void> = Promise.resolve();
@@ -295,6 +317,8 @@ export async function start(
 	}
 	log.info("knowledge serving", {
 		listen: cfg.grpc.listen,
+		identity: cfg.grpc.identity.mode,
+		trustDomain: cfg.grpc.identity.trustDomain,
 		healthListen: cfg.health.listen,
 		generation: first.number,
 		control: cfg.control.address || "(none)",

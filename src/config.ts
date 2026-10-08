@@ -11,13 +11,44 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
+import { validTrustDomain } from "./transport/identity.js";
 
 export const envPrefix = "ANVILKIT_KNOWLEDGE_";
 export const envConfigFile = "ANVILKIT_KNOWLEDGE_CONFIG";
 export const defaultConfigFile = "config.yaml";
 
+/** An outbound transport: development is plaintext (only with development.enabled), tls verifies the server, mtls also presents the workload certificate. */
+export interface ClientTls {
+	mode: "development" | "tls" | "mtls";
+	caFile: string;
+	certFile: string;
+	keyFile: string;
+	serverName: string;
+}
+
 export interface Config {
-	grpc: { listen: string; capacity: number; shutdownTimeoutMs: number };
+	/** The top-level DEVELOPMENT_ONLY guard: every plaintext connection needs its own development mode and this; it downgrades nothing by itself. File-only. */
+	development: { enabled: boolean };
+	grpc: {
+		listen: string;
+		capacity: number;
+		shutdownTimeoutMs: number;
+		/**
+		 * The listener's workload identity (P0.1): mtls serves TLS 1.3 with
+		 * required client certificates verified against the watched bundle and
+		 * authorizes every RPC by the peer's SPIFFE URI SAN under trustDomain;
+		 * development is plaintext and authorizes nothing.
+		 */
+		identity: {
+			mode: "mtls" | "development";
+			trustDomain: string;
+			certFile: string;
+			keyFile: string;
+			caFile: string;
+			maxConnectionAgeMs: number;
+			reloadIntervalMs: number;
+		};
+	};
 	health: { listen: string };
 	/** Spans over OTLP/HTTP to the collector when placed (none otherwise), sampled at sampleRatio; read at process start. */
 	telemetry: { otlpEndpoint: string; sampleRatio: number };
@@ -30,7 +61,7 @@ export interface Config {
 		sweepIntervalMs: number;
 	};
 	outbox: { consumerGroup: string };
-	control: { address: string; timeoutMs: number };
+	control: { address: string; timeoutMs: number; identity: { mode: "mtls" | "development"; serverName: string } };
 	objects: {
 		endpoint: string;
 		stageEndpoint: string;
@@ -55,6 +86,7 @@ export interface Config {
 	};
 	inference: {
 		url: string;
+		tls: ClientTls;
 		timeoutMs: number;
 		maxBatch: number;
 		embeddingProfile: string;
@@ -137,6 +169,10 @@ export function parseDuration(text: unknown, key: string): number {
 const envOverrides: Record<string, string> = {
 	ANVILKIT_KNOWLEDGE_LISTEN: "grpc.listen",
 	ANVILKIT_KNOWLEDGE_HEALTH_LISTEN: "health.listen",
+	ANVILKIT_KNOWLEDGE_IDENTITY_CERT_FILE: "grpc.identity.cert_file",
+	ANVILKIT_KNOWLEDGE_IDENTITY_KEY_FILE: "grpc.identity.key_file",
+	ANVILKIT_KNOWLEDGE_IDENTITY_CA_FILE: "grpc.identity.ca_file",
+	ANVILKIT_KNOWLEDGE_IDENTITY_TRUST_DOMAIN: "grpc.identity.trust_domain",
 	ANVILKIT_KNOWLEDGE_TELEMETRY_OTLP_ENDPOINT: "telemetry.otlp_endpoint",
 	ANVILKIT_KNOWLEDGE_DATABASE_URL: "database.url",
 	ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE: "database.url_file",
@@ -214,13 +250,19 @@ function set(raw: Raw, path: string, value: unknown): void {
 }
 
 const defaults: Raw = {
-	grpc: { listen: "127.0.0.1:9105", capacity: 64, shutdown_timeout: "20s" },
+	development: { enabled: false },
+	grpc: {
+		listen: "127.0.0.1:9105",
+		capacity: 64,
+		shutdown_timeout: "20s",
+		identity: { mode: "mtls", max_connection_age: "1h", reload_interval: "5s" },
+	},
 	health: { listen: "127.0.0.1:9115" },
 	telemetry: { sample_ratio: 1 },
 	database: { max_conn: 8 },
 	tasks: { max_input_bytes: 65536, max_lease: "10m", retry_delay: "5s", max_attempts: 3, sweep_interval: "2s" },
 	outbox: { consumer_group: "anvilkit-agent-knowledge-forwarder" },
-	control: { timeout: "5s" },
+	control: { timeout: "5s", identity: { mode: "mtls", server_name: "anvilkit-agent-control" } },
 	objects: { bucket: "anvilkit-knowledge", region: "us-east-1" },
 	sources: { max_bytes: 33554432 },
 	parser: {
@@ -282,6 +324,21 @@ const defaults: Raw = {
 };
 
 const known = new Set([
+	"development.enabled",
+	"grpc.identity.mode",
+	"grpc.identity.trust_domain",
+	"grpc.identity.cert_file",
+	"grpc.identity.key_file",
+	"grpc.identity.ca_file",
+	"grpc.identity.max_connection_age",
+	"grpc.identity.reload_interval",
+	"control.identity.mode",
+	"control.identity.server_name",
+	"inference.tls.mode",
+	"inference.tls.ca_file",
+	"inference.tls.cert_file",
+	"inference.tls.key_file",
+	"inference.tls.server_name",
 	"telemetry.otlp_endpoint",
 	"telemetry.sample_ratio",
 	"grpc.listen",
@@ -612,6 +669,38 @@ function credentialsFrom(file: string, key: string, have: { id: string; secret: 
 	return { id, secret };
 }
 
+/** The development trust domain, applied only under the guard. */
+export const developmentTrustDomain = "anvilkit.local";
+
+function clientTls(raw: Raw, key: string, development: boolean, errors: string[]): ClientTls {
+	const read = (k: string) => {
+		try {
+			return str(raw, `${key}.${k}`);
+		} catch (err) {
+			errors.push(err instanceof Error ? err.message : String(err));
+			return "";
+		}
+	};
+	const mode = read("mode") || "tls";
+	const t: ClientTls = {
+		mode: mode as ClientTls["mode"],
+		caFile: read("ca_file"),
+		certFile: read("cert_file"),
+		keyFile: read("key_file"),
+		serverName: read("server_name"),
+	};
+	if (mode === "development") {
+		if (!development)
+			errors.push(`${key}.mode development (plaintext) requires development.enabled: true (DEVELOPMENT_ONLY)`);
+	} else if (mode === "tls") {
+		if (!t.caFile) errors.push(`${key}.ca_file is required under ${key}.mode tls`);
+	} else if (mode === "mtls") {
+		if (!t.caFile || !t.certFile || !t.keyFile)
+			errors.push(`${key}.ca_file, cert_file and key_file are required under ${key}.mode mtls`);
+	} else errors.push(`${key}.mode must be development, tls or mtls`);
+	return t;
+}
+
 function validate(raw: Raw): Config {
 	const errors: string[] = [];
 	const attempt = <T>(fn: () => T, fallback: T): T => {
@@ -666,8 +755,61 @@ function validate(raw: Raw): Config {
 		errors.push("objects credentials are required with objects.endpoint");
 	const parserProfile = attempt(() => str(raw, "parser.profile"), "");
 	if (parserProfile && !objectsEndpoint) errors.push("parser.profile requires objects.endpoint");
+	const development = get(raw, "development.enabled") === true;
+	const identityMode = attempt(() => str(raw, "grpc.identity.mode"), "mtls");
+	const identityFiles = {
+		certFile: attempt(() => str(raw, "grpc.identity.cert_file"), ""),
+		keyFile: attempt(() => str(raw, "grpc.identity.key_file"), ""),
+		caFile: attempt(() => str(raw, "grpc.identity.ca_file"), ""),
+	};
+	const trustDomain = attempt(() => str(raw, "grpc.identity.trust_domain"), "");
+	if (identityMode === "mtls") {
+		if (!identityFiles.certFile || !identityFiles.keyFile || !identityFiles.caFile)
+			errors.push(
+				"grpc.identity.cert_file, key_file and ca_file are required under grpc.identity.mode mtls (ANVILKIT_KNOWLEDGE_IDENTITY_{CERT,KEY,CA}_FILE)",
+			);
+	} else if (identityMode === "development") {
+		if (!development)
+			errors.push(
+				"grpc.identity.mode development (plaintext, no caller identity) requires development.enabled: true (DEVELOPMENT_ONLY)",
+			);
+	} else errors.push("grpc.identity.mode must be mtls or development");
+	if (!trustDomain && !development)
+		errors.push(
+			"grpc.identity.trust_domain is required outside development (the development default anvilkit.local applies only with development.enabled: true)",
+		);
+	if (trustDomain && !validTrustDomain(trustDomain))
+		errors.push("grpc.identity.trust_domain must be a lowercase DNS name");
+	const controlIdentityMode = attempt(() => str(raw, "control.identity.mode"), "mtls");
+	if (controlIdentityMode === "development") {
+		if (!development)
+			errors.push(
+				"control.identity.mode development (plaintext) requires development.enabled: true (DEVELOPMENT_ONLY)",
+			);
+	} else if (controlIdentityMode !== "mtls") errors.push("control.identity.mode must be mtls or development");
+	const controlServerName = attempt(() => str(raw, "control.identity.server_name"), "");
+	if (controlIdentityMode === "mtls" && !controlServerName) errors.push("control.identity.server_name is required");
+	const hasIdentityFiles = Boolean(identityFiles.certFile && identityFiles.keyFile && identityFiles.caFile);
+	if (controlIdentityMode === "mtls" && !hasIdentityFiles)
+		errors.push(
+			"control.identity.mode mtls presents the workload certificate and needs grpc.identity.cert_file, key_file and ca_file",
+		);
 	const inferenceUrl = attempt(() => str(raw, "inference.url"), "");
 	if (inferenceUrl && !/^https?:\/\//.test(inferenceUrl)) errors.push("inference.url must be an HTTP(S) URL");
+	// The Inference transport is validated while an Inference is placed.
+	const inferenceTls = inferenceUrl
+		? clientTls(raw, "inference.tls", development, errors)
+		: clientTls(raw, "inference.tls", true, []);
+	if (inferenceUrl.startsWith("http://") && inferenceTls.mode !== "development")
+		errors.push(
+			"inference.url is plaintext: that needs inference.tls.mode development (DEVELOPMENT_ONLY, with development.enabled: true)",
+		);
+	if (inferenceUrl.startsWith("https://") && inferenceTls.mode === "development")
+		errors.push("inference.url is https: inference.tls.mode must be tls or mtls");
+	if (inferenceUrl && inferenceTls.mode === "mtls" && !inferenceTls.certFile && !hasIdentityFiles)
+		errors.push(
+			"inference.tls.mode mtls presents the workload certificate and needs grpc.identity.cert_file, key_file and ca_file",
+		);
 	const qdrantUrl = attempt(() => str(raw, "qdrant.url"), "");
 	if (qdrantUrl && !/^https?:\/\//.test(qdrantUrl)) errors.push("qdrant.url must be an HTTP(S) URL");
 	const qdrantKey = attempt(() => str(raw, "qdrant.api_key"), "");
@@ -701,10 +843,21 @@ function validate(raw: Raw): Config {
 	if (!/^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(minScoreText) || !Number.isFinite(minScore))
 		errors.push("retrieval.min_rerank_score must be a decimal");
 	const cfg: Config = {
+		development: { enabled: development },
 		grpc: {
 			listen,
 			capacity: attempt(() => int(raw, "grpc.capacity", 1, 4096), 64),
 			shutdownTimeoutMs: attempt(() => duration(raw, "grpc.shutdown_timeout", 1, 300_000), 20_000),
+			identity: {
+				mode: identityMode as Config["grpc"]["identity"]["mode"],
+				trustDomain: trustDomain || developmentTrustDomain,
+				...identityFiles,
+				maxConnectionAgeMs: attempt(
+					() => duration(raw, "grpc.identity.max_connection_age", 60_000, 86_400_000),
+					3_600_000,
+				),
+				reloadIntervalMs: attempt(() => duration(raw, "grpc.identity.reload_interval", 100, 3_600_000), 5000),
+			},
 		},
 		health: { listen: health },
 		telemetry: { otlpEndpoint, sampleRatio },
@@ -720,6 +873,7 @@ function validate(raw: Raw): Config {
 		control: {
 			address: attempt(() => str(raw, "control.address"), ""),
 			timeoutMs: attempt(() => duration(raw, "control.timeout", 1, 60_000), 5000),
+			identity: { mode: controlIdentityMode as "mtls" | "development", serverName: controlServerName },
 		},
 		objects: {
 			endpoint: objectsEndpoint,
@@ -747,6 +901,7 @@ function validate(raw: Raw): Config {
 		},
 		inference: {
 			url: inferenceUrl,
+			tls: inferenceTls,
 			timeoutMs: attempt(() => duration(raw, "inference.timeout", 100, 600_000), 30_000),
 			maxBatch: attempt(() => int(raw, "inference.max_batch", 1, 128), 32),
 			embeddingProfile: attempt(() => str(raw, "inference.embedding_profile"), ""),

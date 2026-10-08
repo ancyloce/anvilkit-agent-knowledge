@@ -5,8 +5,9 @@
 // candidate leaves nothing behind and the active generation untouched. New
 // admissions read the active generation; requests and leases keep what
 // they froze.
+import { readFileSync } from "node:fs";
 import type pg from "pg";
-import { InferenceClient } from "./adapters/inference.js";
+import { InferenceClient, type InferenceTransport } from "./adapters/inference.js";
 import { type ParserProfile, parserProfile } from "./adapters/jobcontract.js";
 import { type Kube, KubeClient, loadKubeConfig } from "./adapters/kube.js";
 import { type MemoryStorePort, PostgresMemoryStore } from "./adapters/memorystore.js";
@@ -15,13 +16,50 @@ import { newPool, type Store } from "./adapters/postgres.js";
 import { QdrantIndex, type VectorIndex } from "./adapters/qdrant.js";
 import { type RemovalInventory, S3RemovalInventory } from "./adapters/removals.js";
 import type { Tasks } from "./application/tasks.js";
-import { type Generation, inputsOf, loadFrom } from "./config.js";
+import { type ClientTls, type Generation, inputsOf, loadFrom } from "./config.js";
 import type { Logger } from "./log.js";
 import type { Metrics } from "./metrics.js";
+import { IdentityWatcher, loadMaterial } from "./transport/identity.js";
+
+/**
+ * The Inference transport under inference.tls: development is the
+ * plaintext http:// of the foundation, tls verifies the server against the
+ * bundle of ca_file by server_name (the URL host by default), mtls also
+ * presents the workload certificate from the watcher (or the named files).
+ */
+function inferenceTransport(tls: ClientTls, identity?: IdentityWatcher): InferenceTransport {
+	switch (tls.mode) {
+		case "development":
+			return { mode: "development" };
+		case "tls":
+			return { mode: "tls", ca: () => readFileSync(tls.caFile), serverName: tls.serverName };
+		case "mtls":
+			if (tls.certFile && tls.keyFile) {
+				return {
+					mode: "mtls",
+					ca: () => readFileSync(tls.caFile),
+					identity: () => {
+						const m = loadMaterial({ certFile: tls.certFile, keyFile: tls.keyFile, caFile: tls.caFile });
+						return { cert: m.certPem, key: m.keyPem };
+					},
+					serverName: tls.serverName,
+				};
+			}
+			if (!identity) throw new Error("inference.tls.mode mtls needs the workload identity (grpc.identity.mode mtls)");
+			return {
+				mode: "mtls",
+				ca: () => readFileSync(tls.caFile),
+				identity: () => ({ cert: identity.current().certPem, key: identity.current().keyPem }),
+				serverName: tls.serverName,
+			};
+	}
+}
 
 export interface Runtime {
 	gen: Generation;
 	pool: pg.Pool;
+	/** The workload identity watcher (P0.1); absent under the DEVELOPMENT_ONLY plaintext mode. */
+	identity?: IdentityWatcher;
 	objects?: ObjectStore;
 	kube?: Kube;
 	parser?: ParserProfile;
@@ -38,8 +76,20 @@ export interface Runtime {
  * store, Kubernetes client and reviewed parser profile; any failure closes
  * what was built and rejects the generation.
  */
-export async function buildRuntime(gen: Generation): Promise<Runtime> {
+export async function buildRuntime(gen: Generation, previous?: Runtime): Promise<Runtime> {
 	const c = gen.config;
+	// The identity watcher outlives generations: the files are placements
+	// and the listener holds the watcher, so a later generation reuses it.
+	let identity = previous?.identity;
+	const id = c.grpc.identity;
+	if (!identity && id.certFile && id.keyFile && id.caFile) {
+		identity = new IdentityWatcher(
+			{ certFile: id.certFile, keyFile: id.keyFile, caFile: id.caFile },
+			id.reloadIntervalMs,
+			{ warn: (msg, f) => console.error(JSON.stringify({ level: "warn", msg, ...f })) },
+		);
+		identity.start();
+	}
 	let parser: ParserProfile | undefined;
 	let kube: Kube | undefined;
 	try {
@@ -60,13 +110,19 @@ export async function buildRuntime(gen: Generation): Promise<Runtime> {
 		: undefined;
 	const inf = c.inference;
 	const inference = inf.url
-		? new InferenceClient(inf.url, inf.timeoutMs, {
-				embeddingProfileId: inf.embeddingProfile,
-				embeddingModelRevision: inf.embeddingRevision,
-				dimensions: inf.dimensions,
-				rerankProfileId: inf.rerankProfile,
-				rerankModelRevision: inf.rerankRevision,
-			})
+		? new InferenceClient(
+				inf.url,
+				inf.timeoutMs,
+				{
+					embeddingProfileId: inf.embeddingProfile,
+					embeddingModelRevision: inf.embeddingRevision,
+					dimensions: inf.dimensions,
+					rerankProfileId: inf.rerankProfile,
+					rerankModelRevision: inf.rerankRevision,
+				},
+				undefined,
+				inferenceTransport(inf.tls, identity),
+			)
 		: undefined;
 	const q = c.qdrant;
 	const vectors = q.url
@@ -108,7 +164,7 @@ export async function buildRuntime(gen: Generation): Promise<Runtime> {
 		kube?.close();
 		throw new Error(`database probe: ${err instanceof Error ? err.message : String(err)}`);
 	}
-	return { gen, pool, objects, kube, parser, inference, vectors, memoryStore, removals };
+	return { gen, pool, identity, objects, kube, parser, inference, vectors, memoryStore, removals };
 }
 
 /** Drains the pool within the limit; reports whether the limit cut it short. */
@@ -198,7 +254,7 @@ export class Generations {
 		if (active && inputsOf(candidate) === inputsOf(active)) return false;
 		let rt: Runtime;
 		try {
-			rt = await buildRuntime(candidate);
+			rt = await buildRuntime(candidate, this.active ?? undefined);
 		} catch (err) {
 			this.metrics.configRejections.inc();
 			throw new Error(`generation ${candidate.number} rejected: ${err instanceof Error ? err.message : String(err)}`);
