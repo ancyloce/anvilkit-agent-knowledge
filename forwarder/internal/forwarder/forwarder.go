@@ -2,9 +2,12 @@ package forwarder
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -99,7 +102,15 @@ func Build(ctx context.Context, gen Generation, metrics *Metrics) (rt *Runtime, 
 	if _, err = pool.Exec(probe, `SELECT 1 FROM outbox LIMIT 1`); err != nil {
 		return nil, fmt.Errorf("outbox read probe: %w", err)
 	}
-	nc, err := nats.Connect(c.NATSURL, nats.Name("anvilkit-knowledge-forwarder"), nats.Timeout(c.PublishTimeout), nats.MaxReconnects(-1))
+	natsOpts := []nats.Option{nats.Name("anvilkit-knowledge-forwarder"), nats.Timeout(c.PublishTimeout), nats.MaxReconnects(-1)}
+	if c.NATSTLSMode != "development" {
+		tlsCfg, err := natsTLS(c)
+		if err != nil {
+			return nil, err
+		}
+		natsOpts = append(natsOpts, nats.Secure(tlsCfg))
+	}
+	nc, err := nats.Connect(c.NATSURL, natsOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("nats connect: %w", err)
 	}
@@ -271,4 +282,32 @@ func (g *Generations) Shutdown() (forced bool) {
 		return false
 	}
 	return rt.Retire(rt.gen.Config.CloseTimeout)
+}
+
+// natsTLS is the verified transport of the JetStream connection: the CA
+// bundle and server-name verification, plus the workload certificate under
+// mtls. The files are read at connect time; a rotation takes effect on the
+// next connection (NATS reconnects re-run GetClientCertificate; the roots
+// are the bundle read here, so a CA change needs a restart, recorded for
+// P0.6 together with the server side).
+func natsTLS(c Config) (*tls.Config, error) {
+	caPEM, err := os.ReadFile(c.NATSTLSCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("nats ca: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New("nats ca: bundle holds no certificate")
+	}
+	cfg := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}
+	if c.NATSTLSMode == "mtls" {
+		cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			cert, err := tls.LoadX509KeyPair(c.NATSTLSCertFile, c.NATSTLSKeyFile)
+			if err != nil {
+				return nil, err
+			}
+			return &cert, nil
+		}
+	}
+	return cfg, nil
 }

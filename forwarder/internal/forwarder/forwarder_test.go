@@ -152,7 +152,7 @@ func TestNodeRowsForwardedToJetStream(t *testing.T) {
 		t.Fatalf("%v: %s", err, out)
 	}
 
-	gen, err := forwarder.Load([]string{"ANVILKIT_FORWARDER_DATABASE_URL=" + dsn("anvilkit_knowledge_forwarder", "forwarder"), "ANVILKIT_FORWARDER_NATS_URL=" + natsURL, "ANVILKIT_FORWARDER_POLL_INTERVAL=100ms", "ANVILKIT_FORWARDER_CLOSE_TIMEOUT=5s"}, 1)
+	gen, err := forwarder.Load([]string{"ANVILKIT_FORWARDER_DATABASE_URL=" + dsn("anvilkit_knowledge_forwarder", "forwarder"), "ANVILKIT_FORWARDER_NATS_URL=" + natsURL, "ANVILKIT_FORWARDER_DEVELOPMENT_ENABLED=true", "ANVILKIT_FORWARDER_NATS_TLS_MODE=development", "ANVILKIT_FORWARDER_POLL_INTERVAL=100ms", "ANVILKIT_FORWARDER_CLOSE_TIMEOUT=5s"}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,5 +228,25 @@ func TestNodeRowsForwardedToJetStream(t *testing.T) {
 	}
 	if _, err := fwdConn.Exec(ctx, "SELECT count(*) FROM background_requests"); err == nil {
 		t.Fatal("the forwarder identity must not read domain tables")
+	}
+}
+
+// TestNATSTransportGuard (P0.1): the plaintext JetStream transport needs
+// the development mode and the top-level guard; tls needs the bundle.
+func TestNATSTransportGuard(t *testing.T) {
+	base := []string{"ANVILKIT_FORWARDER_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_knowledge", "ANVILKIT_FORWARDER_NATS_URL=nats://127.0.0.1:4222"}
+	_, err := forwarder.Load(base, 1)
+	if err == nil || !strings.Contains(err.Error(), "NATS_TLS_CA_FILE is required") {
+		t.Fatalf("tls by default needs a bundle: %v", err)
+	}
+	_, err = forwarder.Load(append(base, "ANVILKIT_FORWARDER_NATS_TLS_MODE=development"), 1)
+	if err == nil || !strings.Contains(err.Error(), "DEVELOPMENT_ENABLED=true") {
+		t.Fatalf("development without the guard: %v", err)
+	}
+	if _, err = forwarder.Load(append(base, "ANVILKIT_FORWARDER_NATS_TLS_MODE=development", "ANVILKIT_FORWARDER_DEVELOPMENT_ENABLED=true"), 1); err != nil {
+		t.Fatalf("development under the guard: %v", err)
+	}
+	if _, err = forwarder.Load(append(base, "ANVILKIT_FORWARDER_NATS_TLS_MODE=mtls", "ANVILKIT_FORWARDER_NATS_TLS_CA_FILE=/c"), 1); err == nil || !strings.Contains(err.Error(), "NATS_TLS_CERT_FILE") {
+		t.Fatalf("mtls needs the certificate: %v", err)
 	}
 }

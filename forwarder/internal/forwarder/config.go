@@ -38,11 +38,22 @@ type Config struct {
 	PublishTimeout  time.Duration
 	CloseTimeout    time.Duration
 	ReloadInterval  time.Duration
+	// DevelopmentEnabled is the top-level DEVELOPMENT_ONLY guard: the
+	// plaintext NATS transport needs NATS_TLS_MODE development and this.
+	DevelopmentEnabled bool
+	// NATSTLSMode is development (plaintext, guarded), tls (verify the
+	// server against NATSTLSCAFile) or mtls (additionally present the
+	// workload certificate). Server-side TLS of the JetStream is P0.6.
+	NATSTLSMode     string
+	NATSTLSCAFile   string
+	NATSTLSCertFile string
+	NATSTLSKeyFile  string
 }
 
 var allowed = map[string]bool{
 	"DATABASE_URL": true, "DATABASE_URL_FILE": true, "NATS_URL": true, "CONSUMER_GROUP": true, "HEALTH_LISTEN": true,
 	"POLL_INTERVAL": true, "ACK_DEADLINE": true, "RESEND_INTERVAL": true, "BATCH_SIZE": true, "PUBLISH_TIMEOUT": true, "CLOSE_TIMEOUT": true, "RELOAD_INTERVAL": true,
+	"DEVELOPMENT_ENABLED": true, "NATS_TLS_MODE": true, "NATS_TLS_CA_FILE": true, "NATS_TLS_CERT_FILE": true, "NATS_TLS_KEY_FILE": true,
 }
 
 // Generation is one validated configuration with the digests of its inputs.
@@ -95,6 +106,24 @@ func Load(environ []string, number uint64) (Generation, error) {
 		ConsumerGroup: get("CONSUMER_GROUP", "anvilkit-agent-knowledge-forwarder"), HealthListen: get("HEALTH_LISTEN", "127.0.0.1:9125"),
 		PollInterval: dur("POLL_INTERVAL", "500ms", &errs), AckDeadline: dur("ACK_DEADLINE", "30s", &errs), ResendInterval: dur("RESEND_INTERVAL", "1s", &errs),
 		PublishTimeout: dur("PUBLISH_TIMEOUT", "5s", &errs), CloseTimeout: dur("CLOSE_TIMEOUT", "30s", &errs), ReloadInterval: dur("RELOAD_INTERVAL", "2s", &errs),
+		DevelopmentEnabled: get("DEVELOPMENT_ENABLED", "false") == "true",
+		NATSTLSMode:        get("NATS_TLS_MODE", "tls"), NATSTLSCAFile: values["NATS_TLS_CA_FILE"], NATSTLSCertFile: values["NATS_TLS_CERT_FILE"], NATSTLSKeyFile: values["NATS_TLS_KEY_FILE"],
+	}
+	switch c.NATSTLSMode {
+	case "development":
+		if !c.DevelopmentEnabled {
+			errs = append(errs, fmt.Errorf("%sNATS_TLS_MODE development (plaintext) requires %sDEVELOPMENT_ENABLED=true (DEVELOPMENT_ONLY)", envPrefix, envPrefix))
+		}
+	case "tls":
+		if c.NATSTLSCAFile == "" {
+			errs = append(errs, fmt.Errorf("%sNATS_TLS_CA_FILE is required under %sNATS_TLS_MODE tls", envPrefix, envPrefix))
+		}
+	case "mtls":
+		if c.NATSTLSCAFile == "" || c.NATSTLSCertFile == "" || c.NATSTLSKeyFile == "" {
+			errs = append(errs, fmt.Errorf("%sNATS_TLS_CA_FILE, NATS_TLS_CERT_FILE and NATS_TLS_KEY_FILE are required under %sNATS_TLS_MODE mtls", envPrefix, envPrefix))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("%sNATS_TLS_MODE must be development, tls or mtls", envPrefix))
 	}
 	if n, err := strconv.Atoi(get("BATCH_SIZE", "100")); err != nil || n < 1 || n > 1000 {
 		errs = append(errs, fmt.Errorf("%sBATCH_SIZE must be an integer within [1, 1000]", envPrefix))
@@ -124,7 +153,7 @@ func Load(environ []string, number uint64) (Generation, error) {
 	if len(errs) > 0 {
 		return Generation{}, fmt.Errorf("config: %w", errors.Join(errs...))
 	}
-	nonSecret := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%s|%s|%s", c.NATSURL, c.ConsumerGroup, c.HealthListen, c.PollInterval, c.AckDeadline, c.ResendInterval, c.BatchSize, c.PublishTimeout, c.CloseTimeout, c.ReloadInterval)
+	nonSecret := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%s|%s|%s|%t|%s|%s|%s|%s", c.NATSURL, c.ConsumerGroup, c.HealthListen, c.PollInterval, c.AckDeadline, c.ResendInterval, c.BatchSize, c.PublishTimeout, c.CloseTimeout, c.ReloadInterval, c.DevelopmentEnabled, c.NATSTLSMode, c.NATSTLSCAFile, c.NATSTLSCertFile, c.NATSTLSKeyFile)
 	return Generation{Number: number, Config: c, Digest: digestOf(nonSecret), SecretRevision: digestOf("database.url=" + c.DatabaseURL)}, nil
 }
 
