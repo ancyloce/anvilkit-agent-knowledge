@@ -51,10 +51,10 @@ jobs:
         with:
           version: "v3.19.0"
       - run: >-
-          helm lint deploy/chart --set database.secret.name=knowledge-database --set nats.url=nats://nats:4222
+          helm lint deploy/chart --set database.secret.name=knowledge-database --set nats.url=tls://nats:4222 --set nats.tls.caSecret.name=nats-ca --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer
           --set forwarder.database.secret.name=knowledge-forwarder-database
           --set relay.database.secret.name=knowledge-relay-database --set relay.queue.secret.name=queue-valkey
       - run: >-
-          helm template anvilkit-agent-knowledge deploy/chart --set database.secret.name=knowledge-database --set nats.url=nats://nats:4222
+          helm template anvilkit-agent-knowledge deploy/chart --set database.secret.name=knowledge-database --set nats.url=tls://nats:4222 --set nats.tls.caSecret.name=nats-ca --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer
           --set forwarder.database.secret.name=knowledge-forwarder-database
           --set relay.database.secret.name=knowledge-relay-database --set relay.queue.secret.name=queue-valkey > /dev/null
