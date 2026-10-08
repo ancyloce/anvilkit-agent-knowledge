@@ -3,7 +3,8 @@
 # is defaults < this file < a validated Apollo snapshot (non-secret keys,
 # ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE with apollo.mode: snapshot) < the
 # allowlisted environment: ANVILKIT_KNOWLEDGE_LISTEN,
-# ANVILKIT_KNOWLEDGE_HEALTH_LISTEN, ANVILKIT_KNOWLEDGE_DATABASE_URL or
+# ANVILKIT_KNOWLEDGE_HEALTH_LISTEN, ANVILKIT_KNOWLEDGE_IDENTITY_{CERT,KEY,CA}_FILE,
+# ANVILKIT_KNOWLEDGE_IDENTITY_TRUST_DOMAIN, ANVILKIT_KNOWLEDGE_DATABASE_URL or
 # ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE (the secret, environment or mounted
 # file only), ANVILKIT_KNOWLEDGE_CONTROL_ADDRESS,
 # ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE. Any other ANVILKIT_KNOWLEDGE_*
@@ -15,10 +16,29 @@
 # Go forwarder sidecar (forwarder/) reads it. Sources, ingestion, retrieval
 # and MemoryFact arrive with P15-P17. DEVELOPMENT_ONLY bounds below are not
 # production capacity.
+# development: the top-level DEVELOPMENT_ONLY guard (P0.1). This checked-in
+# file configures host-side runs on the development foundation
+# (deploy/dev), whose Inference and OTLP endpoints are plaintext; every
+# plaintext connection below names its own development mode as well. The
+# guard downgrades nothing by itself: the gRPC listener and the Control
+# client stay mTLS. The chart renders its own file with the guard off.
+development:
+  enabled: true
 grpc:
   listen: 127.0.0.1:9105
   capacity: 64
   shutdown_timeout: 20s
+  # identity: the listener's workload identity (P0.1). mtls serves TLS 1.3
+  # with required, verified client certificates and authorizes every RPC by
+  # the peer's SPIFFE URI SAN under trust_domain; the files are placements
+  # (ANVILKIT_KNOWLEDGE_IDENTITY_{CERT,KEY,CA}_FILE, .local/dev/certs on the
+  # foundation) watched and reloaded as a whole. development is plaintext
+  # and authorizes nothing (requires development.enabled).
+  identity:
+    mode: mtls
+    trust_domain: anvilkit.local
+    max_connection_age: 1h
+    reload_interval: 5s
 health:
   listen: 127.0.0.1:9115
 database:
@@ -35,6 +55,11 @@ outbox:
   consumer_group: anvilkit-agent-knowledge-forwarder
 control:
   timeout: 5s
+  # identity: the Control client presents the workload certificate and
+  # verifies Control by server_name (a DNS SAN of its certificate).
+  identity:
+    mode: mtls
+    server_name: anvilkit-agent-control
 apollo:
   mode: disabled
   app_id: anvilkit-agent-knowledge
@@ -63,6 +88,12 @@ parser:
   presign_ttl: 15m
   kube_timeout: 10s
 inference:
+  # tls: the Inference transport; development is the foundation's plaintext
+  # http:// (DEVELOPMENT_ONLY, needs development.enabled), tls verifies the
+  # server against ca_file by server_name, mtls also presents the workload
+  # certificate (server-side TLS of Inference is P0.6).
+  tls:
+    mode: development
   timeout: 30s
   max_batch: 32
   embedding_profile: bge-m3-v1
