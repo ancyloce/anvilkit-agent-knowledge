@@ -4,7 +4,11 @@
 // the contract's explicit TypeScript validation (protovalidate over the
 // generated descriptors) before its handler; domain errors map to the
 // public codes of contracts.md §4. The listener is plaintext
-// (DEVELOPMENT_ONLY; workload mTLS is ENV-03), like the other new services.
+// mTLS-only under a ServerIdentity (P0.1): TLS 1.3, client certificates
+// required and verified against the watched bundle, every RPC authorized
+// by the peer's workload identity ahead of the handler; the plaintext
+// listener exists only for the DEVELOPMENT_ONLY mode the configuration
+// loader admits under development.enabled.
 
 import {
 	AccessEntry,
@@ -103,6 +107,7 @@ import { type Snapshot as DomainSnapshot, RetrievalError } from "../domain/retri
 import * as domain from "../domain/source.js";
 import { type Task, TaskError } from "../domain/task.js";
 import type { RpcObserver } from "../telemetry.js";
+import { createAuthorizer, type IdentityWatcher, type Policy, serverCredentials } from "./identity.js";
 
 const stateOf: Record<Task["state"], TaskState> = {
 	pending: TaskState.TASK_STATE_PENDING,
@@ -384,6 +389,14 @@ function validated(typeName: string, json: unknown): void {
 		);
 }
 
+/** The listener's identity: the watched material, the trust domain and the allowlist. */
+export interface ServerIdentity {
+	watcher: IdentityWatcher;
+	trustDomain: string;
+	policy: Policy;
+	maxConnectionAgeMs?: number;
+}
+
 export interface GrpcServer {
 	listen(): Promise<number>;
 	serve(): void;
@@ -407,8 +420,35 @@ export function createGrpcServer(
 	projector?: MemoryProjector,
 	recall?: Recall,
 	observer?: RpcObserver,
+	identity?: ServerIdentity,
 ): GrpcServer {
-	const server = new Server();
+	const authorizer = identity
+		? createAuthorizer({
+				trustDomain: identity.trustDomain,
+				policy: identity.policy,
+				trustedCas: () => identity.watcher.current().cas,
+			})
+		: undefined;
+	// Authorization runs first: an unauthorized caller never reaches the
+	// capacity bound, validation or a handler.
+	const server = new Server(
+		authorizer
+			? {
+					interceptors: [authorizer.interceptor],
+					"grpc.max_connection_age_ms": identity?.maxConnectionAgeMs ?? 3_600_000,
+					"grpc.max_connection_age_grace_ms": 30_000,
+				}
+			: {},
+	);
+	const registered: string[] = [
+		"/grpc.health.v1.Health/Check",
+		"/grpc.health.v1.Health/Watch",
+		"/grpc.health.v1.Health/List",
+	];
+	const register = (def: Record<string, { path: string }>, impl: Parameters<Server["addService"]>[1]) => {
+		server.addService(def as Parameters<Server["addService"]>[0], impl);
+		for (const m of Object.values(def)) registered.push(m.path);
+	};
 	const health = new HealthImplementation({ "": "NOT_SERVING" });
 	health.addToServer(server);
 	let inFlight = 0;
@@ -512,7 +552,7 @@ export function createGrpcServer(
 			},
 		),
 	};
-	server.addService(BackgroundTaskServiceService, impl);
+	register(BackgroundTaskServiceService, impl);
 	if (sources) {
 		const src: SourceServiceServer = {
 			registerSource: guard(
@@ -597,7 +637,7 @@ export function createGrpcServer(
 				},
 			),
 		};
-		server.addService(SourceServiceService, src);
+		register(SourceServiceService, src);
 	}
 	if (ingest) {
 		const states = {
@@ -665,7 +705,7 @@ export function createGrpcServer(
 				},
 			),
 		};
-		server.addService(IngestServiceService, ing);
+		register(IngestServiceService, ing);
 	}
 	if (snapshots) {
 		const snap: SnapshotServiceServer = {
@@ -690,7 +730,7 @@ export function createGrpcServer(
 				}),
 			),
 		};
-		server.addService(SnapshotServiceService, snap);
+		register(SnapshotServiceService, snap);
 	}
 	if (memory) {
 		const mem: MemoryServiceServer = {
@@ -801,7 +841,7 @@ export function createGrpcServer(
 				},
 			),
 		};
-		server.addService(MemoryServiceService, mem);
+		register(MemoryServiceService, mem);
 	}
 	if (retrieval) {
 		const ret: RetrievalServiceServer = {
@@ -830,14 +870,14 @@ export function createGrpcServer(
 				},
 			),
 		};
-		server.addService(RetrievalServiceService, ret);
+		register(RetrievalServiceService, ret);
 	}
+	authorizer?.check(registered);
+	const credentials = identity ? serverCredentials(identity.watcher) : ServerCredentials.createInsecure();
 	return {
 		listen: () =>
 			new Promise<number>((resolve, reject) => {
-				server.bindAsync(listen, ServerCredentials.createInsecure(), (err, port) =>
-					err ? reject(err) : resolve(port),
-				);
+				server.bindAsync(listen, credentials, (err, port) => (err ? reject(err) : resolve(port)));
 			}),
 		serve: () => health.setStatus("", "SERVING"),
 		withdraw: () => health.setStatus("", "NOT_SERVING"),
