@@ -11,14 +11,51 @@ import {
 	ClaimTaskRequest,
 	GetTaskRequest,
 } from "@anvilkit/generated-clients/proto/anvilkit/knowledge/v1/knowledge";
-import { credentials, type ServiceError, status } from "@grpc/grpc-js";
+import { type ServiceError, status } from "@grpc/grpc-js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { loadFrom } from "../src/config.js";
 import { silentLogger } from "../src/log.js";
 import { type Started, start } from "../src/main.js";
+import { clientCredentials, clientOptions, IdentityWatcher } from "../src/transport/identity.js";
 import { type Instance, startInstance } from "./harness.js";
+import { files, issue, mount, newCA, spiffe, tempDir } from "./pki.js";
 
 let inst: Instance;
+
+// The P0.1 identity of the scenarios: a throwaway CA, the Knowledge leaf
+// the process serves and a background-worker leaf the client presents.
+const ca = newCA("lifecycle-ca");
+const td = "anvilkit.local";
+const serverDir = tempDir();
+mount(
+	serverDir,
+	issue(
+		ca,
+		"anvilkit-agent-knowledge",
+		[spiffe(td, "anvilkit-apps", "anvilkit-agent-knowledge")],
+		["anvilkit-agent-knowledge"],
+	),
+	ca.pem,
+);
+const workerDir = tempDir();
+mount(
+	workerDir,
+	issue(ca, "anvilkit-agent-background-worker", [spiffe(td, "anvilkit-apps", "anvilkit-agent-background-worker")]),
+	ca.pem,
+);
+const identityEnv = {
+	ANVILKIT_KNOWLEDGE_IDENTITY_CERT_FILE: files(serverDir).certFile,
+	ANVILKIT_KNOWLEDGE_IDENTITY_KEY_FILE: files(serverDir).keyFile,
+	ANVILKIT_KNOWLEDGE_IDENTITY_CA_FILE: files(serverDir).caFile,
+	ANVILKIT_KNOWLEDGE_IDENTITY_TRUST_DOMAIN: td,
+};
+function workerClient(address: string): BackgroundTaskServiceClient {
+	return new BackgroundTaskServiceClient(
+		address,
+		clientCredentials(new IdentityWatcher(files(workerDir), 1000)),
+		clientOptions("anvilkit-agent-knowledge"),
+	);
+}
 
 beforeAll(async () => {
 	inst = await startInstance();
@@ -84,11 +121,12 @@ describe("lifecycle", () => {
 			ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE: secret,
 			ANVILKIT_KNOWLEDGE_LISTEN: grpcAddr,
 			ANVILKIT_KNOWLEDGE_HEALTH_LISTEN: healthAddr,
+			...identityEnv,
 		};
 		const started: Started = await start(loadFrom(cfgFile, environ, 1), silentLogger, environ);
 		expect(await readyStatus(healthAddr)).toBe(200);
 		expect(await metric(healthAddr, "anvilkit_knowledge_config_generation")).toBe("1");
-		const client = new BackgroundTaskServiceClient(grpcAddr, credentials.createInsecure());
+		const client = workerClient(grpcAddr);
 		await expect(
 			call((cb) => client.getTask(GetTaskRequest.fromPartial({ taskId: "missing" }), cb)),
 		).rejects.toMatchObject({ code: status.NOT_FOUND });
@@ -143,6 +181,7 @@ describe("lifecycle", () => {
 			ANVILKIT_KNOWLEDGE_DATABASE_URL: inst.appUrl,
 			ANVILKIT_KNOWLEDGE_LISTEN: blocked,
 			ANVILKIT_KNOWLEDGE_HEALTH_LISTEN: healthAddr,
+			...identityEnv,
 		};
 		await expect(start(loadFrom(cfgFile, environ, 1), silentLogger, environ)).rejects.toThrow();
 		expect(await readyStatus(healthAddr)).toBe(0);
@@ -174,9 +213,10 @@ it("F08 expires the active snapshot, preserves it after a rejected candidate and
 		ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE: snapshot,
 		ANVILKIT_KNOWLEDGE_LISTEN: grpcAddr,
 		ANVILKIT_KNOWLEDGE_HEALTH_LISTEN: healthAddr,
+		...identityEnv,
 	};
 	const running = await start(loadFrom(cfgFile, env, 1), silentLogger, env);
-	const client = new BackgroundTaskServiceClient(grpcAddr, credentials.createInsecure());
+	const client = workerClient(grpcAddr);
 	try {
 		writeFileSync(snapshot, "invalid");
 		await until(async () => Number(await metric(healthAddr, "anvilkit_knowledge_config_rejections_total")) > 0, 2000);

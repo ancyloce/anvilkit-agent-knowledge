@@ -4,7 +4,14 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { inputsOf, loadFrom, parseApolloSnapshot } from "../src/config.js";
 
-const base = { ANVILKIT_KNOWLEDGE_DATABASE_URL: "postgres://u:p@127.0.0.1:5432/anvilkit_knowledge" };
+// P0.1: the identity files are placements the loader does not read.
+const identity = {
+	ANVILKIT_KNOWLEDGE_IDENTITY_CERT_FILE: "/etc/anvilkit/identity/tls.crt",
+	ANVILKIT_KNOWLEDGE_IDENTITY_KEY_FILE: "/etc/anvilkit/identity/tls.key",
+	ANVILKIT_KNOWLEDGE_IDENTITY_CA_FILE: "/etc/anvilkit/identity/ca.crt",
+	ANVILKIT_KNOWLEDGE_IDENTITY_TRUST_DOMAIN: "anvilkit.local",
+};
+const base = { ANVILKIT_KNOWLEDGE_DATABASE_URL: "postgres://u:p@127.0.0.1:5432/anvilkit_knowledge", ...identity };
 
 function write(content: string): string {
 	const dir = mkdtempSync(path.join(tmpdir(), "knowledge-config-"));
@@ -14,6 +21,67 @@ function write(content: string): string {
 }
 
 describe("configuration generations", () => {
+	it("defaults to an mTLS listener and refuses plaintext without the development guard (P0.1)", () => {
+		const g = loadFrom(write("{}\n"), base, 1);
+		expect(g.config.grpc.identity.mode).toBe("mtls");
+		expect(g.config.grpc.identity.trustDomain).toBe("anvilkit.local");
+		expect(g.config.control.identity).toEqual({ mode: "mtls", serverName: "anvilkit-agent-control" });
+		expect(g.config.development.enabled).toBe(false);
+		const { ANVILKIT_KNOWLEDGE_IDENTITY_TRUST_DOMAIN: _td, ...noDomain } = base;
+		const { ANVILKIT_KNOWLEDGE_IDENTITY_CERT_FILE: _c, ...noCert } = base;
+		const cases: [string, NodeJS.ProcessEnv, RegExp][] = [
+			["{}\n", noCert, /grpc.identity.cert_file, key_file and ca_file are required/],
+			["{}\n", noDomain, /grpc.identity.trust_domain is required outside development/],
+			["grpc:\n  identity:\n    trust_domain: Not_A_Domain\n", noDomain, /trust_domain must be a lowercase DNS name/],
+			[
+				"grpc:\n  identity:\n    mode: development\n",
+				base,
+				/grpc.identity.mode development .* requires development.enabled/,
+			],
+			["grpc:\n  identity:\n    mode: plaintext\n", base, /grpc.identity.mode must be mtls or development/],
+			[
+				"control:\n  identity:\n    mode: development\n",
+				base,
+				/control.identity.mode development .* requires development.enabled/,
+			],
+			[
+				"inference:\n  tls:\n    mode: development\n",
+				{ ...base, ANVILKIT_KNOWLEDGE_INFERENCE_URL: "http://inference:8000" },
+				/inference.tls.mode development .* requires development.enabled/,
+			],
+			["{}\n", { ...base, ANVILKIT_KNOWLEDGE_INFERENCE_URL: "http://inference:8000" }, /inference.url is plaintext/],
+			[
+				"development:\n  enabled: true\ninference:\n  tls:\n    mode: development\n",
+				{ ...base, ANVILKIT_KNOWLEDGE_INFERENCE_URL: "https://inference:8000" },
+				/inference.url is https/,
+			],
+			[
+				"inference:\n  tls:\n    mode: mtls\n",
+				{ ...base, ANVILKIT_KNOWLEDGE_INFERENCE_URL: "https://inference:8000" },
+				/inference.tls.ca_file, cert_file and key_file are required/,
+			],
+			["grpc:\n  identity:\n    max_connection_age: 10s\n", base, /max_connection_age/],
+			["{}\n", { ...base, ANVILKIT_KNOWLEDGE_DEVELOPMENT_ENABLED: "true" }, /not allowed overrides/],
+		];
+		for (const [file, env, re] of cases) expect(() => loadFrom(write(file), env, 1), file).toThrow(re);
+		// The guard admits the development modes without downgrading the others.
+		const dev = loadFrom(
+			write("development:\n  enabled: true\ngrpc:\n  identity:\n    mode: development\n"),
+			noDomain,
+			1,
+		);
+		expect(dev.config.grpc.identity.mode).toBe("development");
+		expect(dev.config.grpc.identity.trustDomain).toBe("anvilkit.local");
+		expect(dev.config.control.identity.mode).toBe("mtls");
+		const plainInference = loadFrom(
+			write("development:\n  enabled: true\ninference:\n  tls:\n    mode: development\n"),
+			{ ...base, ANVILKIT_KNOWLEDGE_INFERENCE_URL: "http://127.0.0.1:8000" },
+			1,
+		);
+		expect(plainInference.config.inference.tls.mode).toBe("development");
+		expect(plainInference.config.grpc.identity.mode).toBe("mtls");
+	});
+
 	it("loads the reviewed file and never carries the secret in a digest", () => {
 		const g = loadFrom(path.resolve("config.yaml"), base, 1);
 		expect(g.config.tasks.maxAttempts).toBe(3);
@@ -83,7 +151,11 @@ describe("configuration generations", () => {
 		};
 		writeFileSync(snapshot, JSON.stringify(good));
 		const file = write("apollo:\n  mode: snapshot\n");
-		const env = { ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE: secret, ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE: snapshot };
+		const env = {
+			ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE: secret,
+			ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE: snapshot,
+			...identity,
+		};
 		const g1 = loadFrom(file, env, 1);
 		expect(g1.config.tasks.maxAttempts).toBe(5);
 		expect(g1.apolloRelease).toBe(good.releaseKey);
