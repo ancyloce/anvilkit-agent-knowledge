@@ -102,13 +102,9 @@ func Build(ctx context.Context, gen Generation, metrics *Metrics) (rt *Runtime, 
 	if _, err = pool.Exec(probe, `SELECT 1 FROM outbox LIMIT 1`); err != nil {
 		return nil, fmt.Errorf("outbox read probe: %w", err)
 	}
-	natsOpts := []nats.Option{nats.Name("anvilkit-knowledge-forwarder"), nats.Timeout(c.PublishTimeout), nats.MaxReconnects(-1)}
-	if c.NATSTLSMode != "development" {
-		tlsCfg, err := natsTLS(c)
-		if err != nil {
-			return nil, err
-		}
-		natsOpts = append(natsOpts, nats.Secure(tlsCfg))
+	natsOpts, err := natsOptions(c)
+	if err != nil {
+		return nil, err
 	}
 	nc, err := nats.Connect(c.NATSURL, natsOpts...)
 	if err != nil {
@@ -284,12 +280,58 @@ func (g *Generations) Shutdown() (forced bool) {
 	return rt.Retire(rt.gen.Config.CloseTimeout)
 }
 
+// natsOptions are the JetStream connection's options: the verified
+// transport unless the guarded development mode is plaintext, and the
+// client credential when one is placed.
+func natsOptions(c Config) ([]nats.Option, error) {
+	opts := []nats.Option{nats.Name("anvilkit-knowledge-forwarder"), nats.Timeout(c.PublishTimeout), nats.MaxReconnects(-1)}
+	if c.NATSTLSMode != "development" {
+		tlsCfg, err := natsTLS(c)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, nats.Secure(tlsCfg))
+	}
+	creds, err := natsCredentials(c)
+	if err != nil {
+		return nil, err
+	}
+	if creds != nil {
+		opts = append(opts, creds)
+	}
+	return opts, nil
+}
+
+// natsCredentials is the authentication option of the connection (nil
+// without a credential file). Both options read the mounted file when the
+// connection authenticates, never at configuration time only: the .creds
+// option re-reads the JWT and the seed on every (re)connect, so a rotated
+// CSI file is presented on the next reconnect; the seed option derives the
+// public key here and re-reads the seed to sign each nonce, so a seed
+// rotated to a new key takes effect with the next configuration generation
+// (the credential digest is part of its secret revision).
+func natsCredentials(c Config) (nats.Option, error) {
+	switch {
+	case c.NATSCredsFile == "":
+		return nil, nil
+	case c.NATSCredsNKey:
+		opt, err := nats.NkeyOptionFromSeed(c.NATSCredsFile)
+		if err != nil {
+			return nil, fmt.Errorf("nats credentials: %w", err)
+		}
+		return opt, nil
+	default:
+		return nats.UserCredentials(c.NATSCredsFile), nil
+	}
+}
+
 // natsTLS is the verified transport of the JetStream connection: the CA
-// bundle and server-name verification, plus the workload certificate under
-// mtls. The files are read at connect time; a rotation takes effect on the
-// next connection (NATS reconnects re-run GetClientCertificate; the roots
-// are the bundle read here, so a CA change needs a restart, recorded for
-// P0.6 together with the server side).
+// bundle and server-name verification (NATSTLSServerName when set, else
+// the URL's host), plus the workload certificate under mtls. The files are
+// read at connect time; a rotation takes effect on the next connection
+// (NATS reconnects re-run GetClientCertificate; the roots are the bundle
+// read here, so a CA change needs a restart, recorded for P0.6 together
+// with the server side).
 func natsTLS(c Config) (*tls.Config, error) {
 	caPEM, err := os.ReadFile(c.NATSTLSCAFile)
 	if err != nil {
@@ -299,7 +341,7 @@ func natsTLS(c Config) (*tls.Config, error) {
 	if !pool.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("nats ca: bundle holds no certificate")
 	}
-	cfg := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}
+	cfg := &tls.Config{RootCAs: pool, ServerName: c.NATSTLSServerName, MinVersion: tls.VersionTLS13}
 	if c.NATSTLSMode == "mtls" {
 		cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 			cert, err := tls.LoadX509KeyPair(c.NATSTLSCertFile, c.NATSTLSKeyFile)

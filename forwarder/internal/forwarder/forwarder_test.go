@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nkeys"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -137,6 +138,16 @@ func TestNodeRowsForwardedToJetStream(t *testing.T) {
 	// The Node owner writes a request and its outbox row in one transaction.
 	cmd := exec.CommandContext(ctx, "node", filepath.Join(knowledge, "dist", "localcheck.js"), "request", "--source", "src_1", "--bytes", "interop")
 	cmd.Env = append(os.Environ(), "ANVILKIT_KNOWLEDGE_CONFIG="+filepath.Join(knowledge, "config.yaml"), "ANVILKIT_KNOWLEDGE_DATABASE_URL="+dsn("anvilkit_knowledge_app", "app"))
+	// The owner's configuration needs its workload identity files (P0.1): the
+	// environment's, else the development PKI's (deploy/dev/certs.sh).
+	if os.Getenv("ANVILKIT_KNOWLEDGE_IDENTITY_CERT_FILE") == "" {
+		certs := filepath.Join(knowledge, "..", "..", "..", ".local", "dev", "certs", "anvilkit-agent-knowledge")
+		if _, err := os.Stat(filepath.Join(certs, "tls.key")); err != nil {
+			t.Skipf("UNEXECUTED: the Node producer needs a Knowledge workload identity (ANVILKIT_KNOWLEDGE_IDENTITY_*_FILE or sh deploy/dev/certs.sh): %v", err)
+		}
+		cmd.Env = append(cmd.Env, "ANVILKIT_KNOWLEDGE_IDENTITY_CERT_FILE="+filepath.Join(certs, "tls.crt"),
+			"ANVILKIT_KNOWLEDGE_IDENTITY_KEY_FILE="+filepath.Join(certs, "tls.key"), "ANVILKIT_KNOWLEDGE_IDENTITY_CA_FILE="+filepath.Join(certs, "ca.crt"))
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -248,5 +259,155 @@ func TestNATSTransportGuard(t *testing.T) {
 	}
 	if _, err = forwarder.Load(append(base, "ANVILKIT_FORWARDER_NATS_TLS_MODE=mtls", "ANVILKIT_FORWARDER_NATS_TLS_CA_FILE=/c"), 1); err == nil || !strings.Contains(err.Error(), "NATS_TLS_CERT_FILE") {
 		t.Fatalf("mtls needs the certificate: %v", err)
+	}
+}
+
+// natsCredentials writes a NATS user .creds file and a bare NKey user seed
+// (preceded by an empty line) of a fresh user key. The JWT is a placeholder:
+// the loader classifies the file, the server verifies the JWT.
+func natsCredentials(t *testing.T, dir string) (creds, seed string) {
+	t.Helper()
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := kp.Seed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds, seed = filepath.Join(dir, "user.creds"), filepath.Join(dir, "user.nk")
+	content := "-----BEGIN NATS USER JWT-----\neyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.e30.c2ln\n------END NATS USER JWT------\n\n" +
+		"************************* IMPORTANT *************************\nNKEY Seed printed below can be used to sign and prove identity.\n\n" +
+		"-----BEGIN USER NKEY SEED-----\n" + string(raw) + "\n------END USER NKEY SEED------\n"
+	if err := os.WriteFile(creds, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(seed, []byte("\n"+string(raw)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return creds, seed
+}
+
+// TestNATSCredentialsAndServerName (P0.6): the credential is read and
+// classified at load (a .creds file or a bare NKey seed, anything else
+// rejected without echoing it), required outside development, optional but
+// still used under the guard; its rotation changes only the secret
+// revision; the TLS server name is taken from the environment.
+func TestNATSCredentialsAndServerName(t *testing.T) {
+	dir := t.TempDir()
+	creds, seed := natsCredentials(t, dir)
+	garbage := filepath.Join(dir, "garbage")
+	if err := os.WriteFile(garbage, []byte("\n  not-a-credential-SECRETVALUE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prod := []string{
+		"ANVILKIT_FORWARDER_DATABASE_URL=postgres://u:p@db.example:5432/anvilkit_knowledge?sslmode=verify-full", "ANVILKIT_FORWARDER_NATS_URL=tls://nats.example:4222",
+		"ANVILKIT_FORWARDER_NATS_TLS_CA_FILE=/etc/anvilkit/nats/ca.crt", "ANVILKIT_FORWARDER_NATS_TLS_SERVER_NAME=nats.anvilkit-system.svc",
+	}
+	with := func(base []string, extra ...string) []string { return append(append([]string{}, base...), extra...) }
+
+	g, err := forwarder.Load(with(prod, "ANVILKIT_FORWARDER_NATS_CREDS_FILE="+creds), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := g.Config; c.NATSCredsFile != creds || c.NATSCredsNKey || c.NATSTLSServerName != "nats.anvilkit-system.svc" || c.NATSTLSMode != "tls" {
+		t.Fatalf("%+v", c)
+	}
+	gs, err := forwarder.Load(with(prod, "ANVILKIT_FORWARDER_NATS_CREDS_FILE="+seed), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gs.Config.NATSCredsNKey {
+		t.Fatalf("a bare seed is an NKey credential: %+v", gs.Config)
+	}
+	raw, err := os.ReadFile(creds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(creds, []byte(strings.Replace(string(raw), ".e30.", ".e301.", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g2, err := forwarder.Load(with(prod, "ANVILKIT_FORWARDER_NATS_CREDS_FILE="+creds), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g2.Digest != g.Digest || g2.SecretRevision == g.SecretRevision {
+		t.Fatal("a credential rotation must change the secret revision and nothing else")
+	}
+
+	for name, c := range map[string]struct {
+		env  []string
+		want string
+	}{
+		"credential required outside development": {prod, "ANVILKIT_FORWARDER_NATS_CREDS_FILE is required outside development"},
+		"garbage":                       {with(prod, "ANVILKIT_FORWARDER_NATS_CREDS_FILE="+garbage), "ANVILKIT_FORWARDER_NATS_CREDS_FILE: neither a NATS user credentials file (.creds) nor an NKey user seed"},
+		"missing file":                  {with(prod, "ANVILKIT_FORWARDER_NATS_CREDS_FILE="+filepath.Join(dir, "absent")), "ANVILKIT_FORWARDER_NATS_CREDS_FILE: open"},
+		"plaintext outside development": {with(prod, "ANVILKIT_FORWARDER_NATS_CREDS_FILE="+creds, "ANVILKIT_FORWARDER_NATS_TLS_MODE=development"), "DEVELOPMENT_ENABLED=true"},
+	} {
+		_, err := forwarder.Load(c.env, 1)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: got %v, want %q", name, err, c.want)
+		} else if strings.Contains(err.Error(), "SECRETVALUE") {
+			t.Errorf("%s: the credential content was echoed: %v", name, err)
+		}
+	}
+
+	// Under the guard no credential is admitted, a placed one is still
+	// classified and used, a broken one is still rejected.
+	dev := []string{"ANVILKIT_FORWARDER_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_knowledge?sslmode=disable", "ANVILKIT_FORWARDER_NATS_URL=nats://127.0.0.1:4222", "ANVILKIT_FORWARDER_DEVELOPMENT_ENABLED=true", "ANVILKIT_FORWARDER_NATS_TLS_MODE=development"}
+	if g, err := forwarder.Load(dev, 1); err != nil || g.Config.NATSCredsFile != "" {
+		t.Fatalf("development without a credential: %v", err)
+	}
+	if g, err := forwarder.Load(with(dev, "ANVILKIT_FORWARDER_NATS_CREDS_FILE="+seed), 1); err != nil || !g.Config.NATSCredsNKey {
+		t.Fatalf("development with a credential: %v", err)
+	}
+	if _, err := forwarder.Load(with(dev, "ANVILKIT_FORWARDER_NATS_CREDS_FILE="+garbage), 1); err == nil {
+		t.Fatal("a broken credential is rejected under the guard too")
+	}
+}
+
+// TestDatabaseTLSPolicy (P0.6): outside development the database URL, from
+// the environment or the mounted file, must verify the server
+// (sslmode=verify-full); the error names the mode and the variable, never
+// the URL. Development keeps the foundation's sslmode=disable.
+func TestDatabaseTLSPolicy(t *testing.T) {
+	dir := t.TempDir()
+	creds, _ := natsCredentials(t, dir)
+	env := func(extra ...string) []string {
+		return append([]string{"ANVILKIT_FORWARDER_NATS_URL=tls://nats.example:4222", "ANVILKIT_FORWARDER_NATS_TLS_CA_FILE=/etc/anvilkit/nats/ca.crt", "ANVILKIT_FORWARDER_NATS_CREDS_FILE=" + creds}, extra...)
+	}
+	const rule = "ANVILKIT_FORWARDER_DATABASE_URL: sslmode must be verify-full outside development"
+	for dsn, want := range map[string]string{
+		"postgres://u:hunter2@db.example:5432/anvilkit_knowledge":                                     rule + ` (got "")`,
+		"postgres://u:hunter2@db.example:5432/anvilkit_knowledge?sslmode=disable":                     rule + ` (got "disable")`,
+		"postgres://u:hunter2@db.example:5432/anvilkit_knowledge?sslmode=require":                     rule + ` (got "require")`,
+		"postgresql://u:hunter2@db.example:5432/anvilkit_knowledge?sslmode=verify-ca":                 rule + ` (got "verify-ca")`,
+		"host=db.example user=u password=hunter2 dbname=anvilkit_knowledge sslmode=verify-full":       "ANVILKIT_FORWARDER_DATABASE_URL must be a postgres URL",
+		"postgres://u:hunter2@db.example:5432/anvilkit_knowledge?sslmode=verify-full&sslmode=disable": rule + ` (got "disable")`,
+		"postgres://u:hunter2@db.example:5432/anvilkit_knowledge?sslmode=disable&sslmode=verify-full": "",
+		"postgres://u:hunter2@db.example:5432/anvilkit_knowledge?sslmode=verify-full&ssl=true":        "ANVILKIT_FORWARDER_DATABASE_URL: the ssl parameter is not accepted outside development",
+	} {
+		_, err := forwarder.Load(env("ANVILKIT_FORWARDER_DATABASE_URL="+dsn), 1)
+		switch {
+		case want == "" && err != nil:
+			t.Errorf("%s: %v", dsn, err)
+		case want != "" && (err == nil || !strings.Contains(err.Error(), want)):
+			t.Errorf("%s: got %v, want %q", dsn, err, want)
+		case err != nil && strings.Contains(err.Error(), "hunter2"):
+			t.Errorf("the URL was echoed: %v", err)
+		}
+	}
+	if _, err := forwarder.Load(env("ANVILKIT_FORWARDER_DATABASE_URL=postgresql://u:p@db.example:5432/anvilkit_knowledge?sslmode=verify-full&sslrootcert=/etc/anvilkit/postgres-ca/ca.crt"), 1); err != nil {
+		t.Fatalf("verify-full outside development: %v", err)
+	}
+	secret := filepath.Join(dir, "database-url")
+	if err := os.WriteFile(secret, []byte("postgres://u:hunter2@db.example:5432/anvilkit_knowledge?sslmode=disable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := forwarder.Load(env("ANVILKIT_FORWARDER_DATABASE_URL_FILE="+secret), 1); err == nil || !strings.Contains(err.Error(), `ANVILKIT_FORWARDER_DATABASE_URL_FILE: sslmode must be verify-full outside development (got "disable")`) || strings.Contains(err.Error(), "hunter2") {
+		t.Fatalf("the mounted URL follows the same rule: %v", err)
+	}
+	if _, err := forwarder.Load([]string{"ANVILKIT_FORWARDER_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_knowledge?sslmode=disable", "ANVILKIT_FORWARDER_NATS_URL=nats://127.0.0.1:4222", "ANVILKIT_FORWARDER_DEVELOPMENT_ENABLED=true", "ANVILKIT_FORWARDER_NATS_TLS_MODE=development"}, 1); err != nil {
+		t.Fatalf("development keeps sslmode=disable: %v", err)
 	}
 }
