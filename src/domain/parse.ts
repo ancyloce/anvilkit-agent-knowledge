@@ -131,7 +131,10 @@ const restricted = (uid: number, readOnly = true) => ({
  * trusted stager (UID 10002) alone mounts the stage Secret with the two
  * presigned URLs; the parser (UID 10001) runs between the two stage steps
  * under the AF_UNIX-only syscall profile with the input read-only and no
- * credential.
+ * credential. P0.7 (PAR-01): the parser shares no writable directory with a
+ * stager: the stagers' /tmp (their HOME) is tmp-stage, the parser's is
+ * tmp-parse; of the volumes both mount, the parser only reads stage-in and
+ * the stager only reads stage-out.
  */
 export function jobManifest(
 	t: Template,
@@ -176,7 +179,8 @@ export function jobManifest(
 					volumes: [
 						{ name: "stage-in", emptyDir: { sizeLimit: mb(profile.parser.maxInputBytes) } },
 						{ name: "stage-out", emptyDir: { sizeLimit: mb(profile.parser.maxOutputBytes) } },
-						{ name: "tmp", emptyDir: { sizeLimit: "1Gi" } },
+						{ name: "tmp-stage", emptyDir: { sizeLimit: "64Mi" } },
+						{ name: "tmp-parse", emptyDir: { sizeLimit: "1Gi" } },
 						{ name: "stage-urls", secret: { secretName: t.stageSecret, defaultMode: 0o400 } },
 					],
 					initContainers: [
@@ -190,7 +194,7 @@ export function jobManifest(
 							volumeMounts: [
 								{ name: "stage-in", mountPath: "/stage/in" },
 								{ name: "stage-urls", mountPath: "/run/anvilkit/stage", readOnly: true },
-								{ name: "tmp", mountPath: "/tmp" },
+								{ name: "tmp-stage", mountPath: "/tmp" },
 							],
 						},
 						{
@@ -211,7 +215,7 @@ export function jobManifest(
 							volumeMounts: [
 								{ name: "stage-in", mountPath: "/stage/in", readOnly: true },
 								{ name: "stage-out", mountPath: "/stage/out" },
-								{ name: "tmp", mountPath: "/tmp" },
+								{ name: "tmp-parse", mountPath: "/tmp" },
 							],
 						},
 					],
@@ -227,7 +231,7 @@ export function jobManifest(
 							volumeMounts: [
 								{ name: "stage-out", mountPath: "/stage/out", readOnly: true },
 								{ name: "stage-urls", mountPath: "/run/anvilkit/stage", readOnly: true },
-								{ name: "tmp", mountPath: "/tmp" },
+								{ name: "tmp-stage", mountPath: "/tmp" },
 							],
 						},
 					],

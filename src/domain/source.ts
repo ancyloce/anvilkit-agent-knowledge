@@ -16,6 +16,8 @@ export interface Scope {
 	tenantId: string;
 	projectId: string;
 	actorId: string;
+	/** Verified user roles (P0.3); empty unless the API established them. */
+	roles?: string[];
 }
 
 export interface Command {
@@ -140,10 +142,11 @@ export function trustedAcl(scope: Scope, access: AccessEntry[]): AccessEntry[] {
 	return [...seen.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, e]) => e);
 }
 
-/** The principals a scope holds: its tenant, its actor and, when set, its project. */
+/** The principals a scope holds: its tenant, its actor, its project when set and each verified role. */
 export function principalsOf(scope: Scope): Set<string> {
 	const out = new Set([`tenant:${scope.tenantId}`, `actor:${scope.actorId}`]);
 	if (scope.projectId) out.add(`project:${scope.projectId}`);
+	for (const r of scope.roles ?? []) out.add(`role:${r}`);
 	return out;
 }
 
