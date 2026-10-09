@@ -4,12 +4,16 @@
 // the parent describes the file) < the allowlisted ANVILKIT_KNOWLEDGE_*
 // environment. A candidate is validated as a whole and becomes a complete
 // generation or is rejected; nothing starts on a rejected candidate and no
-// shared value is mutated field by field. The database URL is the only
-// secret: it arrives from the environment or from a mounted secret file
-// whose rotation produces a new generation; it is never accepted from the
-// file or the snapshot and never logged.
+// shared value is mutated field by field. The secrets (the database and
+// Store URLs, the Qdrant key, the object-store credentials) arrive from the
+// environment or from mounted secret files (P0.6: the CSI-delivered form)
+// whose rotation produces a new generation; they are never accepted from the
+// file or the snapshot and never logged. Outside development (P0.6) every
+// PostgreSQL URL verifies the server (sslmode=verify-full) and the object
+// stores and Qdrant are https://.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { parse as parseYaml } from "yaml";
 import { validTrustDomain } from "./transport/identity.js";
 
@@ -188,7 +192,9 @@ const envOverrides: Record<string, string> = {
 	ANVILKIT_KNOWLEDGE_INFERENCE_URL: "inference.url",
 	ANVILKIT_KNOWLEDGE_QDRANT_URL: "qdrant.url",
 	ANVILKIT_KNOWLEDGE_QDRANT_API_KEY: "qdrant.api_key",
+	ANVILKIT_KNOWLEDGE_QDRANT_API_KEY_FILE: "qdrant.api_key_file",
 	ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL: "store.url",
+	ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL_FILE: "store.url_file",
 	ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT: "removals.endpoint",
 	ANVILKIT_KNOWLEDGE_REMOVALS_ACCESS_KEY_ID: "removals.access_key_id",
 	ANVILKIT_KNOWLEDGE_REMOVALS_SECRET_ACCESS_KEY: "removals.secret_access_key",
@@ -216,6 +222,8 @@ const placementKeys = [
 	"parser.image_registry",
 	"inference.url",
 	"qdrant.url",
+	"qdrant.api_key_file",
+	"store.url_file",
 	"removals.endpoint",
 	"removals.credentials_file",
 ];
@@ -384,6 +392,7 @@ const known = new Set([
 	"inference.rerank_revision",
 	"qdrant.url",
 	"qdrant.api_key",
+	"qdrant.api_key_file",
 	"qdrant.timeout",
 	"qdrant.replication_factor",
 	"qdrant.write_consistency_factor",
@@ -405,6 +414,7 @@ const known = new Set([
 	"retrieval.min_rerank_score",
 	"retrieval.max_deadline",
 	"store.url",
+	"store.url_file",
 	"store.schema",
 	"store.max_conn",
 	"memory.max_allowed_facts",
@@ -669,6 +679,105 @@ function credentialsFrom(file: string, key: string, have: { id: string; secret: 
 	return { id, secret };
 }
 
+/**
+ * A secret from the environment or from a mounted secret file, never both.
+ * The file is read for every candidate, so its rotation is a new secret
+ * revision; its content is never echoed.
+ */
+function secretFrom(raw: Raw, key: string, fileKey: string, errors: string[]): string {
+	let value = "";
+	let file = "";
+	try {
+		value = str(raw, key);
+		file = str(raw, fileKey);
+	} catch (err) {
+		errors.push(err instanceof Error ? err.message : String(err));
+		return "";
+	}
+	if (!file) return value;
+	if (value) {
+		errors.push(`${key} and ${fileKey} are mutually exclusive`);
+		return value;
+	}
+	try {
+		value = readFileSync(file, "utf8").trim();
+	} catch (err) {
+		errors.push(`${fileKey}: ${err instanceof Error ? err.message : String(err)}`);
+		return "";
+	}
+	if (!value) errors.push(`${fileKey}: the file is empty`);
+	return value;
+}
+
+/**
+ * P0.6: outside development a PostgreSQL URL must verify the server, i.e.
+ * carry exactly one sslmode=verify-full (node-postgres takes the last of
+ * repeated parameters; the CA is sslrootcert's file, else the default roots
+ * with NODE_EXTRA_CA_CERTS) and name the server by a DNS name: node-postgres
+ * passes no servername for an IP host, so Node checks the certificate
+ * against "localhost" instead of the IP. Returns the refusal, never echoing
+ * the URL.
+ */
+export function postgresTlsError(key: string, url: string): string | undefined {
+	let parsed: URL;
+	try {
+		// node-postgres (pg-connection-string) encodes these before parsing too.
+		const text = / |%[^a-f0-9]|%[a-f0-9][^a-f0-9]/i.test(url) ? encodeURI(url).replace(/%25(\d\d)/g, "%$1") : url;
+		parsed = new URL(text);
+	} catch {
+		return `${key}: not a parseable URL`;
+	}
+	const modes = parsed.searchParams.getAll("sslmode");
+	if (modes.length !== 1 || modes[0] !== "verify-full")
+		return `${key}: sslmode must be verify-full outside development (got ${modes.length === 0 ? "none" : JSON.stringify(modes.join(","))})`;
+	// A host parameter replaces the authority's host in node-postgres.
+	const host = (parsed.searchParams.getAll("host").pop() ?? parsed.hostname).replace(/^\[|\]$/g, "");
+	if (!host || isIP(host) !== 0)
+		return `${key}: the host must be a DNS name outside development (node-postgres verifies an IP host against "localhost", not the IP)`;
+	return undefined;
+}
+
+/**
+ * The URL of the Store migration (dist/storemigrate.js): exactly one of
+ * ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL and, as the mounted secret file,
+ * ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL_FILE; it must verify the server
+ * unless ANVILKIT_KNOWLEDGE_STORE_MIGRATION_DEVELOPMENT=true admits the
+ * plaintext development foundation (DEVELOPMENT_ONLY).
+ */
+export function storeMigrationUrl(environ: NodeJS.ProcessEnv): string {
+	const direct = environ.ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL ?? "";
+	const file = environ.ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL_FILE ?? "";
+	const development = environ.ANVILKIT_KNOWLEDGE_STORE_MIGRATION_DEVELOPMENT ?? "";
+	if (!["", "true", "false"].includes(development))
+		throw new ConfigError("ANVILKIT_KNOWLEDGE_STORE_MIGRATION_DEVELOPMENT must be true or false");
+	if (Boolean(direct) === Boolean(file))
+		throw new ConfigError(
+			"exactly one of ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL and ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL_FILE is required",
+		);
+	let url = direct;
+	if (file) {
+		try {
+			url = readFileSync(file, "utf8").trim();
+		} catch (err) {
+			throw new ConfigError(
+				`ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL_FILE: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+		if (!url) throw new ConfigError("ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL_FILE: the file is empty");
+	}
+	if (!/^postgres(ql)?:\/\//.test(url)) throw new ConfigError("the Store migration URL must be a postgres URL");
+	const tls = development === "true" ? undefined : postgresTlsError("the Store migration URL", url);
+	if (tls)
+		throw new ConfigError(`${tls} (ANVILKIT_KNOWLEDGE_STORE_MIGRATION_DEVELOPMENT=true admits it, DEVELOPMENT_ONLY)`);
+	return url;
+}
+
+/** P0.6: outside development an HTTP endpoint (object store, Qdrant) must be https://. */
+function httpsError(key: string, url: string, development: boolean): string | undefined {
+	if (!url || development || url.startsWith("https://")) return undefined;
+	return `${key} must be https:// outside development (plaintext http:// requires development.enabled: true, DEVELOPMENT_ONLY)`;
+}
+
 /** The development trust domain, applied only under the guard. */
 export const developmentTrustDomain = "anvilkit.local";
 
@@ -732,6 +841,9 @@ function validate(raw: Raw): Config {
 	if (!url)
 		errors.push("database.url is required (ANVILKIT_KNOWLEDGE_DATABASE_URL or ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE)");
 	else if (!/^postgres(ql)?:\/\//.test(url)) errors.push("database.url must be a postgres URL");
+	const development = get(raw, "development.enabled") === true;
+	const databaseTls = url && !development ? postgresTlsError("database.url", url) : undefined;
+	if (databaseTls) errors.push(databaseTls);
 	const maxLease = attempt(() => duration(raw, "tasks.max_lease", 1000, 3_600_000), 600_000);
 	const sweep = attempt(() => duration(raw, "tasks.sweep_interval", 100, 60_000), 2000);
 	if (sweep >= maxLease) errors.push("tasks.sweep_interval must be shorter than tasks.max_lease");
@@ -751,11 +863,12 @@ function validate(raw: Raw): Config {
 	const secretAccessKey = objectsCredentials.secret;
 	const objectsEndpoint = attempt(() => str(raw, "objects.endpoint"), "");
 	if (objectsEndpoint && !/^https?:\/\//.test(objectsEndpoint)) errors.push("objects.endpoint must be an HTTP(S) URL");
+	const objectsTls = httpsError("objects.endpoint", objectsEndpoint, development);
+	if (objectsTls) errors.push(objectsTls);
 	if (objectsEndpoint && (!accessKeyId || !secretAccessKey))
 		errors.push("objects credentials are required with objects.endpoint");
 	const parserProfile = attempt(() => str(raw, "parser.profile"), "");
 	if (parserProfile && !objectsEndpoint) errors.push("parser.profile requires objects.endpoint");
-	const development = get(raw, "development.enabled") === true;
 	const identityMode = attempt(() => str(raw, "grpc.identity.mode"), "mtls");
 	const identityFiles = {
 		certFile: attempt(() => str(raw, "grpc.identity.cert_file"), ""),
@@ -812,9 +925,13 @@ function validate(raw: Raw): Config {
 		);
 	const qdrantUrl = attempt(() => str(raw, "qdrant.url"), "");
 	if (qdrantUrl && !/^https?:\/\//.test(qdrantUrl)) errors.push("qdrant.url must be an HTTP(S) URL");
-	const qdrantKey = attempt(() => str(raw, "qdrant.api_key"), "");
+	const qdrantTls = httpsError("qdrant.url", qdrantUrl, development);
+	if (qdrantTls) errors.push(qdrantTls);
+	const qdrantKey = secretFrom(raw, "qdrant.api_key", "qdrant.api_key_file", errors);
 	if (qdrantUrl && !qdrantKey)
-		errors.push("qdrant.api_key is required with qdrant.url (ANVILKIT_KNOWLEDGE_QDRANT_API_KEY)");
+		errors.push(
+			"qdrant.api_key is required with qdrant.url (ANVILKIT_KNOWLEDGE_QDRANT_API_KEY or ANVILKIT_KNOWLEDGE_QDRANT_API_KEY_FILE)",
+		);
 	const ordering = attempt(() => str(raw, "qdrant.write_ordering"), "strong");
 	if (!["weak", "medium", "strong"].includes(ordering))
 		errors.push("qdrant.write_ordering must be weak, medium or strong");
@@ -824,6 +941,8 @@ function validate(raw: Raw): Config {
 	const removalsEndpoint = attempt(() => str(raw, "removals.endpoint"), "");
 	if (removalsEndpoint && !/^https?:\/\//.test(removalsEndpoint))
 		errors.push("removals.endpoint must be an HTTP(S) URL");
+	const removalsTls = httpsError("removals.endpoint", removalsEndpoint, development);
+	if (removalsTls) errors.push(removalsTls);
 	const removalsCredentialsFile = attempt(() => str(raw, "removals.credentials_file"), "");
 	const removalsCredentials = credentialsFrom(
 		removalsCredentialsFile,
@@ -836,8 +955,10 @@ function validate(raw: Raw): Config {
 	);
 	if (removalsEndpoint && (!removalsCredentials.id || !removalsCredentials.secret))
 		errors.push("removals credentials are required with removals.endpoint");
-	const storeUrl = attempt(() => str(raw, "store.url"), "");
+	const storeUrl = secretFrom(raw, "store.url", "store.url_file", errors);
 	if (storeUrl && !/^postgres(ql)?:\/\//.test(storeUrl)) errors.push("store.url must be a postgres URL");
+	const storeTls = storeUrl && !development ? postgresTlsError("store.url", storeUrl) : undefined;
+	if (storeTls) errors.push(storeTls);
 	const minScoreText = attempt(() => str(raw, "retrieval.min_rerank_score"), "0");
 	const minScore = Number(minScoreText);
 	if (!/^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(minScoreText) || !Number.isFinite(minScore))

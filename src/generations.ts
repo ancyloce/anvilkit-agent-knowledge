@@ -8,7 +8,7 @@
 import { readFileSync } from "node:fs";
 import type pg from "pg";
 import { InferenceClient, type InferenceTransport } from "./adapters/inference.js";
-import { type ParserProfile, parserProfile } from "./adapters/jobcontract.js";
+import { admitParserProfile, type ParserProfile, parserProfile } from "./adapters/jobcontract.js";
 import { type Kube, KubeClient, loadKubeConfig } from "./adapters/kube.js";
 import { type MemoryStorePort, PostgresMemoryStore } from "./adapters/memorystore.js";
 import { type ObjectStore, S3Objects } from "./adapters/objects.js";
@@ -93,7 +93,7 @@ export async function buildRuntime(gen: Generation, previous?: Runtime): Promise
 	let parser: ParserProfile | undefined;
 	let kube: Kube | undefined;
 	try {
-		parser = c.parser.profile ? parserProfile(c.parser.profile) : undefined;
+		parser = c.parser.profile ? admitParserProfile(parserProfile(c.parser.profile), c.development.enabled) : undefined;
 		kube = c.parser.profile ? new KubeClient(loadKubeConfig(c.parser.kubeconfig), c.parser.kubeTimeoutMs) : undefined;
 	} catch (err) {
 		throw new Error(`parser launcher: ${err instanceof Error ? err.message : String(err)}`);

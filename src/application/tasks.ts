@@ -36,7 +36,7 @@ export const systemClock: Clock = { now: () => new Date() };
 
 /** Asks Control about the original dispatch of an external-effect attempt; the disabled one answers unknown. */
 export interface DispatchQuery {
-	outcome(dispatchId: string): Promise<DispatchOutcome>;
+	outcome(tenantId: string, dispatchId: string): Promise<DispatchOutcome>;
 }
 
 export const noDispatchQuery: DispatchQuery = { outcome: async () => "unknown" };
@@ -312,7 +312,7 @@ export class Tasks {
 			let outcome: DispatchOutcome = "unknown";
 			if (task.effects === "external") {
 				try {
-					outcome = await this.dispatch.outcome(task.dispatchId);
+					outcome = await this.dispatch.outcome(task.tenantId, task.dispatchId);
 					this.metrics.dispatchQueries.inc({ answer: outcome });
 				} catch (err) {
 					this.metrics.dispatchQueries.inc({ answer: "error" });

@@ -10,6 +10,8 @@
 // listener exists only for the DEVELOPMENT_ONLY mode the configuration
 // loader admits under development.enabled.
 
+import { AsyncLocalStorage } from "node:async_hooks";
+import { X509Certificate } from "node:crypto";
 import {
 	AccessEntry,
 	AdvanceIndexRequest,
@@ -107,7 +109,28 @@ import { type Snapshot as DomainSnapshot, RetrievalError } from "../domain/retri
 import * as domain from "../domain/source.js";
 import { type Task, TaskError } from "../domain/task.js";
 import type { RpcObserver } from "../telemetry.js";
-import { createAuthorizer, type IdentityWatcher, type Policy, serverCredentials } from "./identity.js";
+import {
+	createAuthorizer,
+	type IdentityWatcher,
+	type Policy,
+	type Principal,
+	peerPrincipal,
+	serverCredentials,
+} from "./identity.js";
+import { api } from "./policy.js";
+
+// The verified workload of the call in progress (P0.3): user roles in a
+// request's scope count only when the API workload carries them.
+const callers = new AsyncLocalStorage<Principal | undefined>();
+
+function callerOf(raw: Buffer | undefined): Principal | undefined {
+	if (!raw) return undefined;
+	try {
+		return peerPrincipal(new X509Certificate(raw));
+	} catch {
+		return undefined;
+	}
+}
 
 const stateOf: Record<Task["state"], TaskState> = {
 	pending: TaskState.TASK_STATE_PENDING,
@@ -246,9 +269,13 @@ function commandOf(c: { tenantId: string; commandId: string; actorId: string; re
 	return { tenantId: c.tenantId, commandId: c.commandId, actorId: c.actorId, requestDigest: c.requestDigest };
 }
 
-function scopeOf(s: { tenantId: string; projectId: string; actorId: string } | undefined): domain.Scope {
+function scopeOf(
+	s: { tenantId: string; projectId: string; actorId: string; roles: string[] } | undefined,
+): domain.Scope {
 	if (!s) throw new domain.SourceError("INVALID_ARGUMENT", "scope is required");
-	return { tenantId: s.tenantId, projectId: s.projectId, actorId: s.actorId };
+	const caller = callers.getStore();
+	const fromApi = caller?.namespace === api.namespace && caller.serviceAccount === api.serviceAccount;
+	return { tenantId: s.tenantId, projectId: s.projectId, actorId: s.actorId, roles: fromApi ? [...s.roles] : [] };
 }
 
 function accessOf(entries: AccessEntry[]): domain.AccessEntry[] {
@@ -476,7 +503,8 @@ export function createGrpcServer(
 			void (async () => {
 				try {
 					validated(typeName, toJson(call.request));
-					cb(null, await fn(call.request));
+					const caller = callerOf(call.getAuthContext().sslPeerCertificate?.raw);
+					cb(null, await callers.run(caller, () => fn(call.request)));
 				} catch (err) {
 					if (
 						typeof err === "object" &&

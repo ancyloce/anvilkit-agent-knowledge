@@ -4,7 +4,7 @@
 // check at startup.
 import { anyAuthenticated, type Policy, type Workload } from "./identity.js";
 
-const api: Workload = { namespace: "anvilkit-apps", serviceAccount: "anvilkit-agent-api" };
+export const api: Workload = { namespace: "anvilkit-apps", serviceAccount: "anvilkit-agent-api" };
 const backgroundWorker: Workload = { namespace: "anvilkit-apps", serviceAccount: "anvilkit-agent-background-worker" };
 const knowledge: Workload = { namespace: "anvilkit-apps", serviceAccount: "anvilkit-agent-knowledge" };
 const sidecar: Workload = { namespace: "anvilkit-components", serviceAccount: "anvilkit-job-access-sidecar" };
