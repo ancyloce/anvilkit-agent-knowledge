@@ -31,8 +31,8 @@ export class ControlDispatchQuery implements DispatchQuery {
 		this.client = new DispatchServiceClient(address, transport, options);
 	}
 
-	outcome(dispatchId: string): Promise<DispatchOutcome> {
-		const req = GetDispatchRequest.fromPartial({ dispatchId, owner });
+	outcome(tenantId: string, dispatchId: string): Promise<DispatchOutcome> {
+		const req = GetDispatchRequest.fromPartial({ dispatchId, owner, tenantId });
 		const v = validateJson("anvilkit.control.v1.GetDispatchRequest", JSON.stringify(GetDispatchRequest.toJSON(req)));
 		if (!v.valid) return Promise.reject(new Error("GetDispatchRequest invalid"));
 		return new Promise((resolve, reject) => {

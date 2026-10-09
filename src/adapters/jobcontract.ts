@@ -50,6 +50,7 @@ export interface ParserProfile {
 	profileId: string;
 	revision: string;
 	jobKind: "parser";
+	state: "enabled" | "disabled" | "development";
 	image: { repository: string; digest: string };
 	entrypoint: string[];
 	resources: { cpu: string; memory: string };
@@ -68,6 +69,18 @@ export function parserProfile(id: string): ParserProfile {
 	validate("#/$defs/profile", p);
 	if (p.jobKind !== "parser") throw new ContractViolation(`${id} is not a parser profile`);
 	return p as unknown as ParserProfile;
+}
+
+/**
+ * P0.8: a profile's state decides before this environment's choice: a
+ * disabled profile is refused everywhere, a development one only runs under
+ * the DEVELOPMENT_ONLY guard (development.enabled).
+ */
+export function admitParserProfile(p: ParserProfile, development: boolean): ParserProfile {
+	if (p.state === "disabled") throw new ContractViolation(`${p.profileId} is disabled until its qualification`);
+	if (p.state === "development" && !development)
+		throw new ContractViolation(`${p.profileId} runs only under development.enabled (DEVELOPMENT_ONLY)`);
+	return p;
 }
 
 /** Strict JSON: duplicate keys and non-finite numbers are refused before validation. */
