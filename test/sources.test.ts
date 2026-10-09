@@ -207,6 +207,20 @@ describe("readability, access and deletion", () => {
 		);
 	});
 
+	it("a source shared with a role is readable by a holder of that verified role and by nobody else (P0.3)", async () => {
+		const shared = (
+			await register(alice, "role-shared.md", "for reviewers\n", [
+				{ principalType: "role", principalId: "reviewer" },
+			] as never[])
+		).source;
+		const reviewer: Scope = { tenantId: "tenant_a", projectId: "proj_a", actorId: "carol", roles: ["reviewer"] };
+		const author: Scope = { tenantId: "tenant_a", projectId: "proj_a", actorId: "dave", roles: ["author"] };
+		expect((await sources.get(reviewer, shared.sourceId)).sourceId).toBe(shared.sourceId);
+		expect(await codeOf(sources.get(author, shared.sourceId))).toBe("NOT_FOUND");
+		expect(await codeOf(sources.get(bob, shared.sourceId))).toBe("NOT_FOUND");
+		expect(await codeOf(sources.get({ ...reviewer, tenantId: "tenant_b" }, shared.sourceId))).toBe("NOT_FOUND");
+	});
+
 	it("replaces the ACL under its expected revision and publishes a revocation when access shrinks", async () => {
 		const s = (await register(alice, "shared.md", "shared\n")).source;
 		const grant = [

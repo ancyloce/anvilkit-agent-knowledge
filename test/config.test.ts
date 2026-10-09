@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { inputsOf, loadFrom, parseApolloSnapshot } from "../src/config.js";
+import { inputsOf, loadFrom, parseApolloSnapshot, storeMigrationUrl } from "../src/config.js";
 
 // P0.1: the identity files are placements the loader does not read.
 const identity = {
@@ -11,7 +11,11 @@ const identity = {
 	ANVILKIT_KNOWLEDGE_IDENTITY_CA_FILE: "/etc/anvilkit/identity/ca.crt",
 	ANVILKIT_KNOWLEDGE_IDENTITY_TRUST_DOMAIN: "anvilkit.local",
 };
-const base = { ANVILKIT_KNOWLEDGE_DATABASE_URL: "postgres://u:p@127.0.0.1:5432/anvilkit_knowledge", ...identity };
+// Outside development every PostgreSQL URL verifies the server (P0.6).
+const base = {
+	ANVILKIT_KNOWLEDGE_DATABASE_URL: "postgres://u:p@db.anvilkit-data.svc:5432/anvilkit_knowledge?sslmode=verify-full",
+	...identity,
+};
 
 function write(content: string): string {
 	const dir = mkdtempSync(path.join(tmpdir(), "knowledge-config-"));
@@ -136,7 +140,7 @@ describe("configuration generations", () => {
 	it("reads the secret file and a validated snapshot below the environment; rotation changes only the secret revision", () => {
 		const dir = mkdtempSync(path.join(tmpdir(), "knowledge-config-"));
 		const secret = path.join(dir, "database-url");
-		writeFileSync(secret, "postgres://u:one@127.0.0.1:5432/anvilkit_knowledge\n");
+		writeFileSync(secret, "postgres://u:one@db.anvilkit-data.svc:5432/anvilkit_knowledge?sslmode=verify-full\n");
 		const now = new Date();
 		const snapshot = path.join(dir, "apollo.json");
 		const good = {
@@ -159,7 +163,7 @@ describe("configuration generations", () => {
 		const g1 = loadFrom(file, env, 1);
 		expect(g1.config.tasks.maxAttempts).toBe(5);
 		expect(g1.apolloRelease).toBe(good.releaseKey);
-		writeFileSync(secret, "postgres://u:two@127.0.0.1:5432/anvilkit_knowledge");
+		writeFileSync(secret, "postgres://u:two@db.anvilkit-data.svc:5432/anvilkit_knowledge?sslmode=verify-full");
 		const g2 = loadFrom(file, env, 2);
 		expect(g2.digest).toBe(g1.digest);
 		expect(g2.secretRevision).not.toBe(g1.secretRevision);
@@ -185,12 +189,12 @@ describe("configuration generations", () => {
 		const file = write("removals:\n  window_margin: 10m\n");
 		const env = {
 			...base,
-			ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT: "http://dr:9000",
+			ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT: "https://dr:9000",
 			ANVILKIT_KNOWLEDGE_REMOVALS_CREDENTIALS_FILE: creds,
 		};
 		const g1 = loadFrom(file, env, 1);
 		expect(g1.config.removals).toMatchObject({
-			endpoint: "http://dr:9000",
+			endpoint: "https://dr:9000",
 			bucket: "anvilkit-memory-removals",
 			accessKeyId: "knowledge-removals",
 			windowMarginMs: 600_000,
@@ -203,6 +207,189 @@ describe("configuration generations", () => {
 		expect(g2.secretRevision).not.toBe(g1.secretRevision);
 		// Unplaced by default: memory serves without the preservation (the service warns).
 		expect(loadFrom(path.resolve("config.yaml"), base, 1).config.removals.endpoint).toBe("");
+	});
+
+	it("reads the Qdrant key and the Store URL from mounted secret files, never both sources; rotation is a new secret revision (P0.6)", () => {
+		const dir = mkdtempSync(path.join(tmpdir(), "knowledge-config-"));
+		const keyFile = path.join(dir, "qdrant-api-key");
+		const storeFile = path.join(dir, "store-url");
+		writeFileSync(keyFile, "qdrant-key-one\n");
+		writeFileSync(storeFile, "postgres://store:one@db:5432/anvilkit_knowledge?sslmode=verify-full\n");
+		const file = write("{}\n");
+		const env = {
+			...base,
+			ANVILKIT_KNOWLEDGE_QDRANT_URL: "https://qdrant:6333",
+			ANVILKIT_KNOWLEDGE_QDRANT_API_KEY_FILE: keyFile,
+			ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL_FILE: storeFile,
+		};
+		const g1 = loadFrom(file, env, 1);
+		expect(g1.config.qdrant.apiKey).toBe("qdrant-key-one");
+		expect(g1.config.store.url).toBe("postgres://store:one@db:5432/anvilkit_knowledge?sslmode=verify-full");
+		expect(inputsOf(g1)).not.toContain("qdrant-key-one");
+		writeFileSync(keyFile, "qdrant-key-two\n");
+		const g2 = loadFrom(file, env, 2);
+		expect(g2.digest).toBe(g1.digest);
+		expect(g2.secretRevision).not.toBe(g1.secretRevision);
+		const cases: [NodeJS.ProcessEnv, RegExp][] = [
+			[
+				{ ...env, ANVILKIT_KNOWLEDGE_QDRANT_API_KEY: "inline" },
+				/qdrant.api_key and qdrant.api_key_file are mutually exclusive/,
+			],
+			[
+				{ ...env, ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL: "postgres://x@db/k?sslmode=verify-full" },
+				/store.url and store.url_file are mutually exclusive/,
+			],
+			[{ ...env, ANVILKIT_KNOWLEDGE_QDRANT_API_KEY_FILE: path.join(dir, "missing") }, /qdrant.api_key_file: ENOENT/],
+			[{ ...env, ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL_FILE: write("") }, /store.url_file: the file is empty/],
+		];
+		for (const [e, want] of cases) expect(() => loadFrom(file, e, 3)).toThrow(want);
+		// The file keys are placements: never accepted from the reviewed file.
+		expect(() => loadFrom(write(`qdrant:\n  api_key_file: ${keyFile}\n`), base, 1)).toThrow(/secret or a placement/);
+		expect(() => loadFrom(write(`store:\n  url_file: ${storeFile}\n`), base, 1)).toThrow(/secret or a placement/);
+	});
+
+	it("refuses plaintext data-plane endpoints and unverified PostgreSQL URLs outside development, never echoing the URL (P0.6)", () => {
+		const secretUrl = "postgres://u:hunter2@db:5432/anvilkit_knowledge";
+		const cases: [NodeJS.ProcessEnv, RegExp][] = [
+			[
+				{ ...base, ANVILKIT_KNOWLEDGE_DATABASE_URL: secretUrl },
+				/database.url: sslmode must be verify-full outside development \(got none\)/,
+			],
+			[
+				{ ...base, ANVILKIT_KNOWLEDGE_DATABASE_URL: `${secretUrl}?sslmode=require` },
+				/database.url: sslmode must be verify-full outside development \(got "require"\)/,
+			],
+			[
+				// node-postgres takes the last of repeated parameters.
+				{ ...base, ANVILKIT_KNOWLEDGE_DATABASE_URL: `${secretUrl}?sslmode=verify-full&sslmode=disable` },
+				/database.url: sslmode must be verify-full .*got "verify-full,disable"/,
+			],
+			[
+				{ ...base, ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL: `${secretUrl}?sslmode=require` },
+				/store.url: sslmode must be verify-full outside development \(got "require"\)/,
+			],
+			[
+				// node-postgres would check an IP host's certificate against "localhost".
+				{
+					...base,
+					ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL: "postgres://u:hunter2@10.0.0.7:5432/k?sslmode=verify-full",
+				},
+				/store.url: the host must be a DNS name outside development/,
+			],
+			[
+				{ ...base, ANVILKIT_KNOWLEDGE_DATABASE_URL: `${secretUrl}?sslmode=verify-full&host=127.0.0.1` },
+				/database.url: the host must be a DNS name outside development/,
+			],
+			[
+				{
+					...base,
+					ANVILKIT_KNOWLEDGE_OBJECTS_ENDPOINT: "http://minio:9000",
+					ANVILKIT_KNOWLEDGE_OBJECTS_ACCESS_KEY_ID: "a",
+					ANVILKIT_KNOWLEDGE_OBJECTS_SECRET_ACCESS_KEY: "s",
+				},
+				/objects.endpoint must be https:\/\/ outside development/,
+			],
+			[
+				{
+					...base,
+					ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT: "http://dr:9000",
+					ANVILKIT_KNOWLEDGE_REMOVALS_ACCESS_KEY_ID: "a",
+					ANVILKIT_KNOWLEDGE_REMOVALS_SECRET_ACCESS_KEY: "s",
+				},
+				/removals.endpoint must be https:\/\/ outside development/,
+			],
+			[
+				{ ...base, ANVILKIT_KNOWLEDGE_QDRANT_URL: "http://qdrant:6333", ANVILKIT_KNOWLEDGE_QDRANT_API_KEY: "k" },
+				/qdrant.url must be https:\/\/ outside development/,
+			],
+		];
+		for (const [env, want] of cases) {
+			let message = "";
+			try {
+				loadFrom(write("{}\n"), env, 1);
+			} catch (err) {
+				message = (err as Error).message;
+			}
+			expect(message).toMatch(want);
+			expect(message).not.toContain("hunter2");
+			expect(message).not.toContain("minio:9000");
+		}
+		// The verified forms load outside development.
+		const secure = loadFrom(
+			write("{}\n"),
+			{
+				...base,
+				ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL: `${secretUrl}?sslmode=verify-full&sslrootcert=/etc/anvilkit/pg/ca.crt`,
+				ANVILKIT_KNOWLEDGE_OBJECTS_ENDPOINT: "https://minio:9000",
+				ANVILKIT_KNOWLEDGE_OBJECTS_ACCESS_KEY_ID: "a",
+				ANVILKIT_KNOWLEDGE_OBJECTS_SECRET_ACCESS_KEY: "s",
+				ANVILKIT_KNOWLEDGE_QDRANT_URL: "https://qdrant:6333",
+				ANVILKIT_KNOWLEDGE_QDRANT_API_KEY: "k",
+			},
+			1,
+		);
+		expect(secure.config.development.enabled).toBe(false);
+		expect(secure.config.qdrant.url).toBe("https://qdrant:6333");
+		// The guard admits the plaintext foundation (DEVELOPMENT_ONLY).
+		const dev = loadFrom(
+			write("development:\n  enabled: true\n"),
+			{
+				...base,
+				ANVILKIT_KNOWLEDGE_DATABASE_URL: `${secretUrl}?sslmode=disable`,
+				ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL: secretUrl,
+				ANVILKIT_KNOWLEDGE_OBJECTS_ENDPOINT: "http://minio:9000",
+				ANVILKIT_KNOWLEDGE_OBJECTS_ACCESS_KEY_ID: "a",
+				ANVILKIT_KNOWLEDGE_OBJECTS_SECRET_ACCESS_KEY: "s",
+				ANVILKIT_KNOWLEDGE_QDRANT_URL: "http://qdrant:6333",
+				ANVILKIT_KNOWLEDGE_QDRANT_API_KEY: "k",
+			},
+			1,
+		);
+		expect(dev.config.objects.endpoint).toBe("http://minio:9000");
+	});
+
+	it("resolves the Store migration URL from exactly one source and refuses an unverified URL unless admitted (P0.6)", () => {
+		const verified = "postgres://m:secret@db:5432/anvilkit_knowledge?sslmode=verify-full";
+		const plain = "postgres://m:secret@db:5432/anvilkit_knowledge?sslmode=disable";
+		const dir = mkdtempSync(path.join(tmpdir(), "knowledge-store-migration-"));
+		const file = path.join(dir, "url");
+		writeFileSync(file, `${verified}\n`);
+		expect(storeMigrationUrl({ ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL: verified })).toBe(verified);
+		expect(storeMigrationUrl({ ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL_FILE: file })).toBe(verified);
+		expect(
+			storeMigrationUrl({
+				ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL: plain,
+				ANVILKIT_KNOWLEDGE_STORE_MIGRATION_DEVELOPMENT: "true",
+			}),
+		).toBe(plain);
+		const cases: [NodeJS.ProcessEnv, RegExp][] = [
+			[{}, /exactly one of ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL and ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL_FILE/],
+			[
+				{ ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL: verified, ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL_FILE: file },
+				/exactly one of/,
+			],
+			[
+				{ ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL: plain },
+				/sslmode must be verify-full outside development \(got "disable"\)/,
+			],
+			[
+				{ ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL: plain, ANVILKIT_KNOWLEDGE_STORE_MIGRATION_DEVELOPMENT: "false" },
+				/sslmode must be verify-full/,
+			],
+			[
+				{ ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL: plain, ANVILKIT_KNOWLEDGE_STORE_MIGRATION_DEVELOPMENT: "yes" },
+				/must be true or false/,
+			],
+			[{ ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL_FILE: path.join(dir, "missing") }, /_URL_FILE: ENOENT/],
+		];
+		for (const [env, want] of cases) {
+			expect(() => storeMigrationUrl(env)).toThrow(want);
+			try {
+				storeMigrationUrl(env);
+			} catch (err) {
+				expect((err as Error).message).not.toContain("secret");
+			}
+		}
 	});
 });
 

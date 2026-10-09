@@ -113,7 +113,11 @@ describe("lifecycle", () => {
 		const secret = path.join(dir, "database-url");
 		writeFileSync(secret, inst.appUrl);
 		const cfgFile = path.join(dir, "config.yaml");
-		writeFileSync(cfgFile, "reload:\n  interval: 200ms\n  drain_limit: 5s\ntasks:\n  sweep_interval: 200ms\n");
+		// The testcontainers database is plaintext: admitted only under the guard (P0.6).
+		writeFileSync(
+			cfgFile,
+			"development:\n  enabled: true\nreload:\n  interval: 200ms\n  drain_limit: 5s\ntasks:\n  sweep_interval: 200ms\n",
+		);
 		const grpcAddr = `127.0.0.1:${await freePort()}`;
 		const healthAddr = `127.0.0.1:${await freePort()}`;
 		const environ = {
@@ -175,7 +179,7 @@ describe("lifecycle", () => {
 		const healthAddr = `127.0.0.1:${await freePort()}`;
 		const dir = mkdtempSync(path.join(tmpdir(), "knowledge-"));
 		const cfgFile = path.join(dir, "config.yaml");
-		writeFileSync(cfgFile, "{}\n");
+		writeFileSync(cfgFile, "development:\n  enabled: true\n");
 		const environ = {
 			ANVILKIT_KNOWLEDGE_CONFIG: cfgFile,
 			ANVILKIT_KNOWLEDGE_DATABASE_URL: inst.appUrl,
@@ -193,7 +197,10 @@ it("F08 expires the active snapshot, preserves it after a rejected candidate and
 	const dir = mkdtempSync(path.join(tmpdir(), "knowledge-expiry-"));
 	const cfgFile = path.join(dir, "config.yaml"),
 		snapshot = path.join(dir, "snapshot.json");
-	writeFileSync(cfgFile, "apollo:\n  mode: snapshot\nreload:\n  interval: 100ms\n  drain_limit: 2s\n");
+	writeFileSync(
+		cfgFile,
+		"development:\n  enabled: true\napollo:\n  mode: snapshot\nreload:\n  interval: 100ms\n  drain_limit: 2s\n",
+	);
 	const healthAddr = `127.0.0.1:${await freePort()}`,
 		grpcAddr = `127.0.0.1:${await freePort()}`;
 	const doc = {
