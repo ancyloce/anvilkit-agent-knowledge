@@ -58,8 +58,13 @@ spec:
             # The secret as a mounted file: the kubelet refreshes it when the
             # Secret changes and the generation watcher publishes the new
             # generation (a new pool, probed, then the old one drained).
+            {{- $csi := eq .Values.secrets.provider "csi" }}
+            {{- if .Values.trust.configMap }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/anvilkit/trust/ca.crt
+            {{- end }}
             - name: ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE
-              value: /var/run/secrets/anvilkit/database/{{ .Values.database.secret.key }}
+              value: {{ include "anvilkit-agent-knowledge.credentialFile" (dict "root" . "csi" "database-url" "kube" (printf "/var/run/secrets/anvilkit/database/%s" .Values.database.secret.key)) }}
             {{- if eq .Values.identity.mode "mtls" }}
             - name: ANVILKIT_KNOWLEDGE_IDENTITY_CERT_FILE
               value: /etc/anvilkit/identity/tls.crt
@@ -85,7 +90,7 @@ spec:
             - name: ANVILKIT_KNOWLEDGE_OBJECTS_STAGE_ENDPOINT
               value: {{ .Values.objects.stageEndpoint | default .Values.objects.endpoint | quote }}
             - name: ANVILKIT_KNOWLEDGE_OBJECTS_CREDENTIALS_FILE
-              value: /var/run/secrets/anvilkit/objects/{{ .Values.objects.credentials.secret.key }}
+              value: {{ include "anvilkit-agent-knowledge.credentialFile" (dict "root" . "csi" "objects-credentials" "kube" (printf "/var/run/secrets/anvilkit/objects/%s" .Values.objects.credentials.secret.key)) }}
             {{- end }}
             {{- if .Values.removals.endpoint }}
             # P23: the removal inventory in the independent DR store (its own
@@ -94,7 +99,7 @@ spec:
             - name: ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT
               value: {{ .Values.removals.endpoint | quote }}
             - name: ANVILKIT_KNOWLEDGE_REMOVALS_CREDENTIALS_FILE
-              value: /var/run/secrets/anvilkit/removals/{{ .Values.removals.credentials.secret.key }}
+              value: {{ include "anvilkit-agent-knowledge.credentialFile" (dict "root" . "csi" "removals-credentials" "kube" (printf "/var/run/secrets/anvilkit/removals/%s" .Values.removals.credentials.secret.key)) }}
             {{- end }}
             {{- if .Values.parser.enabled }}
             - name: ANVILKIT_KNOWLEDGE_IMAGE_REGISTRY
@@ -108,14 +113,20 @@ spec:
             - name: ANVILKIT_KNOWLEDGE_QDRANT_URL
               value: {{ .Values.qdrant.url | quote }}
             {{- end }}
-            {{- if .Values.qdrant.apiKeySecret.name }}
+            {{- if and $csi .Values.qdrant.url }}
+            - name: ANVILKIT_KNOWLEDGE_QDRANT_API_KEY_FILE
+              value: /var/run/secrets/anvilkit/csi/qdrant-api-key
+            {{- else if and (not $csi) .Values.qdrant.apiKeySecret.name }}
             - name: ANVILKIT_KNOWLEDGE_QDRANT_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.qdrant.apiKeySecret.name }}
                   key: {{ .Values.qdrant.apiKeySecret.key }}
             {{- end }}
-            {{- if .Values.store.secret.name }}
+            {{- if and $csi .Values.store.enabled }}
+            - name: ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL_FILE
+              value: /var/run/secrets/anvilkit/csi/store-database-url
+            {{- else if and (not $csi) .Values.store.secret.name }}
             - name: ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -153,9 +164,20 @@ spec:
             - name: config
               mountPath: /etc/anvilkit/anvilkit-agent-knowledge
               readOnly: true
+            {{- if .Values.trust.configMap }}
+            - name: trust
+              mountPath: /etc/anvilkit/trust
+              readOnly: true
+            {{- end }}
+            {{- if $csi }}
+            - name: credentials
+              mountPath: /var/run/secrets/anvilkit/csi
+              readOnly: true
+            {{- else }}
             - name: database
               mountPath: /var/run/secrets/anvilkit/database
               readOnly: true
+            {{- end }}
             {{- if eq .Values.identity.mode "mtls" }}
             - name: identity
               mountPath: /etc/anvilkit/identity
@@ -166,12 +188,12 @@ spec:
               mountPath: /etc/anvilkit/inference-ca
               readOnly: true
             {{- end }}
-            {{- if .Values.objects.endpoint }}
+            {{- if and (not $csi) .Values.objects.endpoint }}
             - name: objects
               mountPath: /var/run/secrets/anvilkit/objects
               readOnly: true
             {{- end }}
-            {{- if .Values.removals.endpoint }}
+            {{- if and (not $csi) .Values.removals.endpoint }}
             - name: removals
               mountPath: /var/run/secrets/anvilkit/removals
               readOnly: true
@@ -192,7 +214,16 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           env:
             - name: ANVILKIT_FORWARDER_DATABASE_URL_FILE
-              value: /var/run/secrets/anvilkit/forwarder-database/{{ .Values.forwarder.database.secret.key }}
+              value: {{ include "anvilkit-agent-knowledge.credentialFile" (dict "root" . "csi" "forwarder-database-url" "kube" (printf "/var/run/secrets/anvilkit/forwarder-database/%s" .Values.forwarder.database.secret.key)) }}
+            {{- if or $csi .Values.nats.credentials.secret.name }}
+            - name: ANVILKIT_FORWARDER_NATS_CREDS_FILE
+              value: {{ include "anvilkit-agent-knowledge.credentialFile" (dict "root" . "csi" "nats-creds" "kube" (printf "/var/run/secrets/anvilkit/nats/%s" .Values.nats.credentials.secret.forwarderKey)) }}
+            {{- end }}
+            {{- if .Values.trust.configMap }}
+            # Go: the trust bundle beside the image's roots (the DSN's sslrootcert names it too).
+            - name: SSL_CERT_DIR
+              value: /etc/ssl/certs:/etc/anvilkit/trust
+            {{- end }}
             - name: ANVILKIT_FORWARDER_NATS_URL
               value: {{ .Values.nats.url | quote }}
             - name: ANVILKIT_FORWARDER_CONSUMER_GROUP
@@ -233,9 +264,25 @@ spec:
           resources:
             {{- toYaml .Values.forwarder.resources | nindent 12 }}
           volumeMounts:
+            {{- if .Values.trust.configMap }}
+            - name: trust
+              mountPath: /etc/anvilkit/trust
+              readOnly: true
+            {{- end }}
+            {{- if $csi }}
+            - name: credentials
+              mountPath: /var/run/secrets/anvilkit/csi
+              readOnly: true
+            {{- else }}
             - name: forwarder-database
               mountPath: /var/run/secrets/anvilkit/forwarder-database
               readOnly: true
+            {{- if .Values.nats.credentials.secret.name }}
+            - name: nats-credentials
+              mountPath: /var/run/secrets/anvilkit/nats
+              readOnly: true
+            {{- end }}
+            {{- end }}
             {{- if ne .Values.nats.tls.mode "development" }}
             - name: nats-ca
               mountPath: /etc/anvilkit/nats-ca
@@ -259,16 +306,41 @@ spec:
               value: /etc/anvilkit/anvilkit-agent-background-worker/config.yaml
             - name: ANVILKIT_BACKGROUND_WORKER_RELAY_OWNER
               value: knowledge
+            {{- if .Values.trust.configMap }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/anvilkit/trust/ca.crt
+            {{- end }}
             - name: ANVILKIT_BACKGROUND_WORKER_KNOWLEDGE_ADDRESS
               value: {{ printf "127.0.0.1:%d" (int .Values.listen.port) | quote }}
             - name: ANVILKIT_BACKGROUND_WORKER_HEALTH_LISTEN
               value: {{ printf "%s:%d" .Values.listen.address (int .Values.relay.healthPort) | quote }}
             - name: ANVILKIT_BACKGROUND_WORKER_NATS_URL
               value: {{ .Values.nats.url | quote }}
+            # P0.6: the relay's own NATS transport and user.
+            - name: ANVILKIT_BACKGROUND_WORKER_NATS_TLS_MODE
+              value: {{ .Values.nats.tls.mode | quote }}
+            {{- if ne .Values.nats.tls.mode "development" }}
+            - name: ANVILKIT_BACKGROUND_WORKER_NATS_TLS_CA_FILE
+              value: /etc/anvilkit/nats-ca/ca.crt
+            {{- end }}
+            {{- if eq .Values.nats.tls.mode "mtls" }}
+            - name: ANVILKIT_BACKGROUND_WORKER_NATS_TLS_CERT_FILE
+              value: /etc/anvilkit/identity/tls.crt
+            - name: ANVILKIT_BACKGROUND_WORKER_NATS_TLS_KEY_FILE
+              value: /etc/anvilkit/identity/tls.key
+            {{- end }}
+            {{- if or $csi .Values.nats.credentials.secret.name }}
+            - name: ANVILKIT_BACKGROUND_WORKER_NATS_CREDS_FILE
+              value: {{ include "anvilkit-agent-knowledge.credentialFile" (dict "root" . "csi" "relay-nats-creds" "kube" (printf "/var/run/secrets/anvilkit/nats/%s" .Values.nats.credentials.secret.relayKey)) }}
+            {{- end }}
             - name: ANVILKIT_BACKGROUND_WORKER_RELAY_DATABASE_URL_FILE
-              value: /var/run/secrets/anvilkit/relay-database/{{ .Values.relay.database.secret.key }}
+              value: {{ include "anvilkit-agent-knowledge.credentialFile" (dict "root" . "csi" "relay-database-url" "kube" (printf "/var/run/secrets/anvilkit/relay-database/%s" .Values.relay.database.secret.key)) }}
             - name: ANVILKIT_BACKGROUND_WORKER_QUEUE_URL_FILE
-              value: /var/run/secrets/anvilkit/queue/{{ .Values.relay.queue.secret.key }}
+              value: {{ include "anvilkit-agent-knowledge.credentialFile" (dict "root" . "csi" "relay-queue-url" "kube" (printf "/var/run/secrets/anvilkit/queue/%s" .Values.relay.queue.secret.key)) }}
+            {{- with .Values.relay.queue.tls.caFile }}
+            - name: ANVILKIT_BACKGROUND_WORKER_QUEUE_TLS_CA_FILE
+              value: {{ . | quote }}
+            {{- end }}
             # P0.1: the relay dials this Pod's BackgroundTaskService with the
             # Pod's own workload identity and verifies it by the Service name.
             - name: ANVILKIT_BACKGROUND_WORKER_IDENTITY_MODE
@@ -302,22 +374,49 @@ spec:
           resources:
             {{- toYaml .Values.relay.resources | nindent 12 }}
           volumeMounts:
+            {{- if .Values.trust.configMap }}
+            - name: trust
+              mountPath: /etc/anvilkit/trust
+              readOnly: true
+            {{- end }}
+            {{- if $csi }}
+            - name: credentials
+              mountPath: /var/run/secrets/anvilkit/csi
+              readOnly: true
+            {{- else }}
             - name: relay-database
               mountPath: /var/run/secrets/anvilkit/relay-database
               readOnly: true
+            - name: queue
+              mountPath: /var/run/secrets/anvilkit/queue
+              readOnly: true
+            {{- if .Values.nats.credentials.secret.name }}
+            - name: nats-credentials
+              mountPath: /var/run/secrets/anvilkit/nats
+              readOnly: true
+            {{- end }}
+            {{- end }}
             {{- if eq .Values.identity.mode "mtls" }}
             - name: identity
               mountPath: /etc/anvilkit/identity
               readOnly: true
             {{- end }}
-            - name: queue
-              mountPath: /var/run/secrets/anvilkit/queue
+            {{- if ne .Values.nats.tls.mode "development" }}
+            - name: nats-ca
+              mountPath: /etc/anvilkit/nats-ca
               readOnly: true
+            {{- end }}
         {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "anvilkit-agent-knowledge.fullname" . }}
+        {{- if .Values.trust.configMap }}
+        - name: trust
+          configMap:
+            name: {{ .Values.trust.configMap }}
+            items: [{key: ca.crt, path: ca.crt}]
+        {{- end }}
         {{- if eq .Values.identity.mode "mtls" }}
         - name: identity
           secret:
@@ -340,6 +439,14 @@ spec:
               - key: {{ .Values.inference.tls.caSecret.key }}
                 path: ca.crt
         {{- end }}
+        {{- if eq .Values.secrets.provider "csi" }}
+        - name: credentials
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ include "anvilkit-agent-knowledge.fullname" . }}
+        {{- else }}
         - name: database
           secret:
             secretName: {{ .Values.database.secret.name }}
@@ -352,6 +459,13 @@ spec:
         - name: removals
           secret:
             secretName: {{ required "removals.credentials.secret.name is required with removals.endpoint" .Values.removals.credentials.secret.name }}
+        {{- end }}
+        {{- if .Values.nats.credentials.secret.name }}
+        - name: nats-credentials
+          secret:
+            secretName: {{ .Values.nats.credentials.secret.name }}
+            defaultMode: 0440
+        {{- end }}
         {{- end }}
         {{- if .Values.parser.enabled }}
         - name: kube-api-access
@@ -366,12 +480,12 @@ spec:
                     - key: ca.crt
                       path: ca.crt
         {{- end }}
-        {{- if .Values.forwarder.enabled }}
+        {{- if and (not $csi) .Values.forwarder.enabled }}
         - name: forwarder-database
           secret:
             secretName: {{ .Values.forwarder.database.secret.name }}
         {{- end }}
-        {{- if .Values.relay.enabled }}
+        {{- if and (not $csi) .Values.relay.enabled }}
         - name: relay-database
           secret:
             secretName: {{ .Values.relay.database.secret.name }}

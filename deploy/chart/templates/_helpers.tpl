@@ -60,16 +60,26 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/* Required environment values, checked once for every template. */}}
 {{- define "anvilkit-agent-knowledge.require" -}}
-{{- if not .Values.database.secret.name }}
+{{- $kube := eq .Values.secrets.provider "kubernetes" -}}
+{{- if not (has .Values.secrets.provider (list "kubernetes" "csi")) }}
+{{- fail "secrets.provider must be kubernetes or csi" }}
+{{- end }}
+{{- if and (not $kube) (or (not .Values.secrets.csi.address) (not .Values.secrets.csi.path)) }}
+{{- fail "secrets.csi.address and secrets.csi.path are required under secrets.provider csi (the OpenBao address and the service's KV v2 data path)" }}
+{{- end }}
+{{- if and $kube (not .Values.development.enabled) (or .Values.forwarder.enabled .Values.relay.enabled) (not .Values.nats.credentials.secret.name) }}
+{{- fail "nats.credentials.secret.name is required outside development: the NATS server admits no anonymous client (or use secrets.provider csi)" }}
+{{- end }}
+{{- if and $kube (not .Values.database.secret.name) }}
 {{- fail "database.secret.name is required: an existing Secret holding the application-role URL, mounted as the file ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE names" }}
 {{- end }}
 {{- if not .Values.nats.url }}
 {{- fail "nats.url is required: the JetStream placement of the forwarder and the relay" }}
 {{- end }}
-{{- if and .Values.forwarder.enabled (not .Values.forwarder.database.secret.name) }}
+{{- if and $kube .Values.forwarder.enabled (not .Values.forwarder.database.secret.name) }}
 {{- fail "forwarder.database.secret.name is required while forwarder.enabled is true: the forwarder role's database URL" }}
 {{- end }}
-{{- if and .Values.relay.enabled (or (not .Values.relay.database.secret.name) (not .Values.relay.queue.secret.name)) }}
+{{- if and $kube .Values.relay.enabled (or (not .Values.relay.database.secret.name) (not .Values.relay.queue.secret.name)) }}
 {{- fail "relay.database.secret.name and relay.queue.secret.name are required while relay.enabled is true: the relay role's database URL and the queue Valkey URL" }}
 {{- end }}
 {{- if not (has .Values.identity.mode (list "mtls" "development")) }}
@@ -148,4 +158,13 @@ loader's keys. */}}
 {{- $_ = set $cfg.inference "tls" $it -}}
 {{- end -}}
 {{- toYaml $cfg -}}
+{{- end -}}
+
+{{/* P0.6: where each credential file is inside the Pod. */}}
+{{- define "anvilkit-agent-knowledge.credentialFile" -}}
+{{- if eq .root.Values.secrets.provider "csi" -}}
+/var/run/secrets/anvilkit/csi/{{ .csi }}
+{{- else -}}
+{{ .kube }}
+{{- end -}}
 {{- end -}}

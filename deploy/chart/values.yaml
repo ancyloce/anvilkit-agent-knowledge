@@ -79,6 +79,37 @@ database:
     name: ""
     key: url
 
+# Credential delivery (P0.6). kubernetes mounts the existing Secrets named
+# in this file (database, objects, removals, qdrant.apiKeySecret,
+# store.secret, nats.credentials, forwarder.database, relay.database,
+# relay.queue): the development foundation's path. csi mounts the
+# credentials from OpenBao through the Secrets Store CSI driver (provider
+# openbao, Kubernetes auth with the Pod's ServiceAccount token of audience
+# csi.audience; no Kubernetes Secret is synced) read-only at
+# /var/run/secrets/anvilkit/csi in the containers that read them. The
+# service's KV v2 path holds database-url, objects-credentials,
+# removals-credentials, qdrant-api-key and store-database-url (Knowledge),
+# forwarder-database-url and nats-creds (forwarder), relay-database-url,
+# relay-queue-url and relay-nats-creds (relay), each key only while its
+# feature is configured.
+secrets:
+  provider: kubernetes
+  csi:
+    address: ""
+    caCertPath: ""
+    audience: openbao
+    role: ""
+    path: ""
+
+# P0.6: the data plane's CA bundle: a ConfigMap (key ca.crt) in this
+# namespace, e.g. the anvilkit-trust map deploy/qualification/bootstrap.py
+# maintains. Mounted at /etc/anvilkit/trust in every container that connects
+# to PostgreSQL (the DSNs' sslrootcert names /etc/anvilkit/trust/ca.crt) or
+# an HTTPS data store, and added to the Node processes' roots
+# (NODE_EXTRA_CA_CERTS). Empty: the image's roots only.
+trust:
+  configMap: ""
+
 # The JetStream placement (forwarder and relay). Required. tls is the
 # forwarder's transport: tls verifies the server against caSecret (key
 # ca.crt), mtls also presents the workload certificate, development is the
@@ -90,6 +121,16 @@ nats:
     caSecret:
       name: ""
       key: ca.crt
+  # The NATS user credentials (P0.6): an NKey seed or a .creds file each for
+  # the forwarder (ANVILKIT_FORWARDER_NATS_CREDS_FILE) and the relay
+  # (ANVILKIT_BACKGROUND_WORKER_NATS_CREDS_FILE); under secrets.provider
+  # kubernetes an existing Secret with the two keys below, required outside
+  # development (the server admits no anonymous client).
+  credentials:
+    secret:
+      name: ""
+      forwarderKey: forwarder
+      relayKey: relay
 
 # The Control placement of the original-dispatch query; optional. The client
 # presents the workload certificate and verifies Control by serverName.
@@ -161,6 +202,9 @@ qdrant:
 # the memory projection is not configured. An environment variable is read at
 # start: rotating it rolls the Pods (the app-role URL file reloads in place).
 store:
+  # Under secrets.provider csi: whether the projection is configured (its
+  # URL is the store-database-url key); under kubernetes store.secret.name.
+  enabled: false
   secret:
     name: ""
     key: url
@@ -205,6 +249,12 @@ relay:
     secret:
       name: ""
       key: url
+    # The queue Valkey's CA inside the Pod for a rediss:// URL
+    # (ANVILKIT_BACKGROUND_WORKER_QUEUE_TLS_CA_FILE), e.g. the cluster CA of
+    # the workload identity /etc/anvilkit/identity/ca.crt; empty uses the
+    # image's roots.
+    tls:
+      caFile: ""
   healthPort: 9126
   resources:
     requests:
