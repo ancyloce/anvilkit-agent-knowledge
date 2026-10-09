@@ -7,7 +7,8 @@
 # ANVILKIT_KNOWLEDGE_IDENTITY_TRUST_DOMAIN, ANVILKIT_KNOWLEDGE_DATABASE_URL or
 # ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE (the secret, environment or mounted
 # file only), ANVILKIT_KNOWLEDGE_CONTROL_ADDRESS,
-# ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE. Any other ANVILKIT_KNOWLEDGE_*
+# ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE and the placements named in the
+# sections below. Any other ANVILKIT_KNOWLEDGE_*
 # variable, any unknown key here and any secret or placement key here
 # rejects the candidate before anything starts.
 #
@@ -21,7 +22,12 @@
 # (deploy/dev), whose Inference and OTLP endpoints are plaintext; every
 # plaintext connection below names its own development mode as well. The
 # guard downgrades nothing by itself: the gRPC listener and the Control
-# client stay mTLS. The chart renders its own file with the guard off.
+# client stay mTLS. Outside development (P0.6) every PostgreSQL URL must
+# carry sslmode=verify-full (the CA through sslrootcert) and the object
+# stores (objects, removals) and Qdrant must be https:// (their CA from
+# the default roots with NODE_EXTRA_CA_CERTS); the foundation's plaintext
+# endpoints are admitted only under this guard. The chart renders its own
+# file with the guard off.
 development:
   enabled: true
 grpc:
@@ -103,8 +109,9 @@ inference:
   rerank_revision: 953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e
 # P16: the vector projection and hybrid retrieval (DD-07 §3/§4). The Qdrant
 # placement and API key come from the environment only
-# (ANVILKIT_KNOWLEDGE_QDRANT_URL, ANVILKIT_KNOWLEDGE_QDRANT_API_KEY); without
-# them nothing is indexed or retrieved. Replication 1/1 and the retrieval
+# (ANVILKIT_KNOWLEDGE_QDRANT_URL, and ANVILKIT_KNOWLEDGE_QDRANT_API_KEY or the
+# mounted secret file ANVILKIT_KNOWLEDGE_QDRANT_API_KEY_FILE, not both);
+# without them nothing is indexed or retrieved. Replication 1/1 and the retrieval
 # bounds below are DEVELOPMENT_ONLY (the production layout is RF=3/WCF=2,
 # platform.md); min_rerank_score is the development profile's no-answer
 # floor, not a qualified quality threshold.
@@ -135,7 +142,11 @@ retrieval:
 # projection lives in its own vendor schema, prepared by the Store's own
 # migrations under a separate identity (dist/storemigrate.js) and used here
 # with ensureTables: false through its own pool; the runtime Store role's URL
-# is environment-only (ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL). Without it no
+# is environment-only (ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL or the mounted
+# secret file ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL_FILE, not both; the
+# migration takes ANVILKIT_KNOWLEDGE_STORE_MIGRATION_URL or _URL_FILE and
+# admits a plaintext URL only with
+# ANVILKIT_KNOWLEDGE_STORE_MIGRATION_DEVELOPMENT=true). Without it no
 # fact is projected to the Store (the projection tasks fail and are retried
 # by reconciliation). Semantic recall uses the vector generations of the
 # retrieval profile above; max_allowed_facts bounds the allowed-fact set of
