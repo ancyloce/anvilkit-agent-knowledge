@@ -354,3 +354,55 @@ describe("hybrid retrieval", () => {
 		expect(none).toMatchObject({ items: [], noAnswer: true });
 	});
 });
+
+describe("commercial authorization (P2.1)", () => {
+	it("refuses a search Control denies or cannot decide before any vector is queried", async () => {
+		const snap = (await snapshots.create(cmd(alice), alice, ["src-brand"])).snapshot;
+		let queried = 0;
+		const counting = new Proxy(vectors, {
+			get: (target, prop, recv) =>
+				prop === "search"
+					? async (collection: string, q: HybridQuery): Promise<ScoredPoint[]> => {
+							queried++;
+							return target.search(collection, q);
+						}
+					: Reflect.get(target, prop, recv),
+		});
+		const asks: string[] = [];
+		const withControl = (answer: "allow" | "deny" | "error") =>
+			new Retrieval(
+				store,
+				() => counting,
+				() => inference,
+				() => objects,
+				() => activeSpace,
+				() => profile,
+				() => 1 << 20,
+				clock,
+				silentLogger,
+				metrics,
+				{
+					check: async (scope, resourceType, resourceId, action) => {
+						asks.push(`${scope.tenantId}:${resourceType}:${resourceId}:${action}`);
+						if (answer === "error") throw new Error("UNAVAILABLE");
+						return { allowed: answer === "allow", revision: "rev-1", reason: answer === "deny" ? "NO_SUBSCRIPTION" : "" };
+					},
+				},
+			);
+		const req: SearchRequest = {
+			scope: alice,
+			snapshotId: snap.snapshotId,
+			query: "hero banner teal backgrounds",
+			maxContextItems: 4,
+			retrievalProfileId: baseProfile.profileId,
+			deadline: new Date(clock.now().getTime() + 30_000),
+		};
+		await expect(withControl("deny").search(req)).rejects.toMatchObject({ code: "FORBIDDEN" });
+		await expect(withControl("error").search(req)).rejects.toMatchObject({ code: "UNAVAILABLE" });
+		expect(queried).toBe(0);
+		const allowed = await withControl("allow").search(req);
+		expect(allowed.noAnswer).toBe(false);
+		expect(queried).toBe(1);
+		expect(asks[0]).toBe(`tenant_a:knowledge-snapshot:${snap.snapshotId}:read`);
+	});
+});
