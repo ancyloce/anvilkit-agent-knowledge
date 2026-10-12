@@ -8,13 +8,18 @@ export const api: Workload = { namespace: "anvilkit-apps", serviceAccount: "anvi
 const backgroundWorker: Workload = { namespace: "anvilkit-apps", serviceAccount: "anvilkit-agent-background-worker" };
 const knowledge: Workload = { namespace: "anvilkit-apps", serviceAccount: "anvilkit-agent-knowledge" };
 const sidecar: Workload = { namespace: "anvilkit-components", serviceAccount: "anvilkit-job-access-sidecar" };
+const workflow: Workload = { namespace: "anvilkit-apps", serviceAccount: "anvilkit-agent-workflow" };
 
 export function policy(): Policy {
 	const p: Policy = {};
 	const add = (service: string, methods: string[], ...allowed: Workload[]) => {
 		for (const m of methods) p[`/anvilkit.knowledge.v1.${service}/${m}`] = allowed;
 	};
-	add("SourceService", ["RegisterSource", "GetSource", "ListSources", "UpdateSourceAccess", "DeleteSource"], api);
+	add("SourceService", ["RegisterSource", "ListSources", "UpdateSourceAccess", "DeleteSource"], api);
+	// P2.2: the Workflow reads the content digest of a brief reference
+	// under the operation's own user scope (readability is still decided
+	// for that user).
+	add("SourceService", ["GetSource"], api, workflow);
 	add("SnapshotService", ["CreateSnapshot", "GetSnapshot"], api);
 	add("MemoryService", ["ProposeFact", "DecideFact", "GetFact", "ListFacts", "DeleteFact", "RecallFacts"], api);
 	add("RetrievalService", ["Search"], api, sidecar);
