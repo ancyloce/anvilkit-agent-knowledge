@@ -48,6 +48,43 @@ export interface SearchRequest {
 	deadline: Date;
 }
 
+/**
+ * Control's commercial authorization of a disclosure (P2.1, DD-02 §3):
+ * asked before retrieval reads any vector or text. Knowledge's own ACL
+ * still decides which sources are readable; this decides whether the
+ * caller may be disclosed anything from the resource at all.
+ */
+export interface Disclosure {
+	check(scope: Scope, resourceType: string, resourceId: string, action: string): Promise<DisclosureDecision>;
+}
+
+export interface DisclosureDecision {
+	allowed: boolean;
+	revision: string;
+	reason: string;
+}
+
+/** Asks a disclosure and turns anything but an allow into a refusal. */
+export async function requireDisclosure(
+	disclosure: Disclosure | undefined,
+	scope: Scope,
+	resourceType: string,
+	resourceId: string,
+): Promise<void> {
+	if (!disclosure) return;
+	let d: DisclosureDecision;
+	try {
+		d = await disclosure.check(scope, resourceType, resourceId, "read");
+	} catch {
+		throw new RetrievalError("UNAVAILABLE", "commercial authorization unavailable (AUTHORITY_UNAVAILABLE)");
+	}
+	if (!d.allowed)
+		throw new RetrievalError(
+			"FORBIDDEN",
+			`commercial authorization denied: ${d.reason || "DENIED"} (revision ${d.revision})`,
+		);
+}
+
 export interface SearchResult {
 	items: ContextItem[];
 	noAnswer: boolean;
@@ -69,6 +106,7 @@ export class Retrieval {
 		private readonly clock: Clock,
 		private readonly log: Logger,
 		private readonly metrics: Metrics,
+		private readonly disclosure?: Disclosure,
 	) {}
 
 	async search(req: SearchRequest): Promise<SearchResult> {
@@ -113,6 +151,8 @@ export class Retrieval {
 		const scope = req.scope;
 		if (!snap || snap.tenantId !== scope.tenantId || (scope.projectId && snap.projectId !== scope.projectId))
 			throw new RetrievalError("NOT_FOUND", "snapshot");
+		// Control's commercial authorization before anything is read (P2.1).
+		await requireDisclosure(this.disclosure, scope, "knowledge-snapshot", snap.snapshotId);
 		const g = await idx.getGeneration(this.store.pool, snap.generation);
 		if (!g) throw new RetrievalError("NOT_FOUND", "snapshot");
 		if (!sameSpace(g, space))
