@@ -7,7 +7,7 @@
 // generation's pool last, with the probe listener after it.
 import { type ChannelCredentials, type ChannelOptions, credentials } from "@grpc/grpc-js";
 import { collectDefaultMetrics, Registry } from "prom-client";
-import { ControlDispatchQuery } from "./adapters/control.js";
+import { ControlDisclosure, ControlDispatchQuery } from "./adapters/control.js";
 import type { ParserProfile } from "./adapters/jobcontract.js";
 import { Store } from "./adapters/postgres.js";
 import { Indexer } from "./application/indexer.js";
@@ -69,6 +69,15 @@ export async function start(
 		: noDispatchQuery;
 	if (!cfg.control.address)
 		log.warn("no Control placement: expired external-effect leases are never reassigned (control.address unset)");
+	// P2.1: Control's commercial authorization of every disclosure; without
+	// a Control placement (development only) no commercial decision exists.
+	const disclosure = cfg.control.address
+		? new ControlDisclosure(cfg.control.address, cfg.control.timeoutMs, ...controlTransport())
+		: undefined;
+	if (!disclosure)
+		log.warn(
+			"DEVELOPMENT_ONLY: no Control placement, disclosures are not commercially authorized (control.address unset)",
+		);
 	const t = cfg.tasks;
 	const tasks = new Tasks(
 		store,
@@ -157,6 +166,7 @@ export async function start(
 		systemClock,
 		log,
 		metrics,
+		disclosure,
 	);
 	// P17: MemoryFact decisions, their projections and recall. The vector
 	// space of memory points is the reviewed embedding profile alone (no
