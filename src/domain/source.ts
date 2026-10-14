@@ -10,6 +10,8 @@ export type PrincipalType = "tenant" | "project" | "actor" | "role";
 export interface AccessEntry {
 	principalType: PrincipalType;
 	principalId: string;
+	/** P2.7: read (absent) or manage: read, replace the ACL, delete. */
+	permission?: "read" | "manage";
 }
 
 export interface Scope {
@@ -44,6 +46,8 @@ export interface Source {
 	objectKey: string;
 	aclRevision: number;
 	access: AccessEntry[];
+	/** P2.7: the registering actor, who manages the source without an entry. */
+	ownerId?: string;
 	ingest: IngestState;
 	deleted: boolean;
 	createdAt: Date;
@@ -70,7 +74,8 @@ export class SourceError extends Error {
 			| "REVISION_MISMATCH"
 			| "UNSUPPORTED_SOURCE"
 			| "SOURCE_UNVERIFIED"
-			| "SOURCE_TOO_LARGE",
+			| "SOURCE_TOO_LARGE"
+			| "UNAVAILABLE",
 		message: string,
 	) {
 		super(`${code}: ${message}`);
@@ -93,6 +98,26 @@ export function sourceIdOf(cmd: Command): string {
 
 export const ingestRequestIdOf = (sourceId: string, revision: number): string => `ing-${sourceId}-r${revision}`;
 export const ingestTaskIdOf = (sourceId: string, revision: number): string => `ingest-${sourceId}-r${revision}`;
+
+/**
+ * P2.6: an upload capability's id is derived from its command (a retried
+ * BeginUpload names the same upload); its object is uploads/<tenant>/<id>.
+ */
+export function uploadIdOf(cmd: Command): string {
+	return `upl-${hash("upload", cmd.tenantId, cmd.commandId).slice(0, 32)}`;
+}
+
+const uploadIdPattern = /^upl-[0-9a-f]{32}$/;
+export const isUploadId = (name: string): boolean => uploadIdPattern.test(name);
+
+/** The upload a document locator names (upload:<name>), checked. */
+export function uploadNameOf(locator: string): string {
+	if (!locator.startsWith("upload:"))
+		throw new SourceError("UNSUPPORTED_SOURCE", "a document source names an upload (upload:<uploadId>)");
+	const name = locator.slice("upload:".length);
+	if (!uploadName.test(name)) throw new SourceError("INVALID_ARGUMENT", "upload name");
+	return name;
+}
 
 /** The caller's upload for a document source: uploads/<tenant>/<name> in Knowledge's store. */
 export function uploadKeyOf(scope: Scope, locator: string): string {
@@ -137,9 +162,33 @@ export function trustedAcl(scope: Scope, access: AccessEntry[]): AccessEntry[] {
 			throw new SourceError("FORBIDDEN", "an access entry names another tenant");
 		if (e.principalType === "project" && (!scope.projectId || e.principalId !== scope.projectId))
 			throw new SourceError("FORBIDDEN", "an access entry names a project outside the scope");
-		seen.set(`${e.principalType}:${e.principalId}`, { principalType: e.principalType, principalId: e.principalId });
+		if (e.permission !== undefined && e.permission !== "read" && e.permission !== "manage")
+			throw new SourceError("INVALID_ARGUMENT", `permission ${String(e.permission)}`);
+		const key = `${e.principalType}:${e.principalId}`;
+		// One entry per principal; manage includes read.
+		const manage = e.permission === "manage" || seen.get(key)?.permission === "manage";
+		seen.set(key, {
+			principalType: e.principalType,
+			principalId: e.principalId,
+			...(manage ? { permission: "manage" } : {}),
+		});
 	}
 	return [...seen.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, e]) => e);
+}
+
+/**
+ * P2.7: who may replace a source's ACL or delete it: a reader that owns the
+ * source (its registering actor) or holds a manage entry (an actor, a
+ * project, the tenant, or a role the API verified).
+ */
+export function manageable(
+	s: Pick<Source, "tenantId" | "projectId" | "deleted" | "access" | "ownerId">,
+	scope: Scope,
+): boolean {
+	if (!readable(s, scope)) return false;
+	if (s.ownerId && s.ownerId === scope.actorId) return true;
+	const held = principalsOf(scope);
+	return s.access.some((e) => e.permission === "manage" && held.has(`${e.principalType}:${e.principalId}`));
 }
 
 /** The principals a scope holds: its tenant, its actor, its project when set and each verified role. */

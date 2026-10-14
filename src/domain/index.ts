@@ -151,6 +151,8 @@ export interface PointPayload {
 export interface IndexInput {
 	schemaVersion: 1;
 	computation: typeof indexProfile;
+	/** P2.7: the entry's attempt (a retry is a new task generation); absent is 1. */
+	attempt?: number;
 	sourceId: string;
 	sourceRevision: number;
 	ingestRequestId: string;
@@ -181,7 +183,8 @@ export function parseIndexInput(text: string): IndexInput {
 		Number.isSafeInteger(r.chunkCount) &&
 		(r.chunkCount ?? -1) >= 0 &&
 		typeof r.embeddingProfile === "string" &&
-		typeof r.modelRevision === "string";
+		typeof r.modelRevision === "string" &&
+		(r.attempt === undefined || (Number.isSafeInteger(r.attempt) && r.attempt >= 1));
 	if (!ok) throw new IndexError("INVALID_ARGUMENT", `index input does not match ${indexProfile}`);
 	return r as IndexInput;
 }
@@ -224,12 +227,22 @@ export function qualifies(p: {
 	eligible: number;
 	accepted: number;
 	open: number;
+	/** P2.7: revisions quarantined after their attempts; settled, without points. */
+	quarantined?: number;
+	/** P2.7: previously indexed revisions not yet parsed under the generation's chunker. */
+	waiting?: number;
 	expectedPoints: number;
 	countedPoints: number;
 }): { ok: true } | { ok: false; reason: string } {
 	if (p.open > 0) return { ok: false, reason: `${p.open} entries not accepted` };
-	if (p.accepted !== p.eligible)
-		return { ok: false, reason: `${p.accepted} of ${p.eligible} source revisions indexed` };
+	if ((p.waiting ?? 0) > 0)
+		return { ok: false, reason: `${p.waiting} indexed revisions not yet parsed under the generation's chunker` };
+	const quarantined = p.quarantined ?? 0;
+	if (p.accepted + quarantined !== p.eligible)
+		return {
+			ok: false,
+			reason: `${p.accepted} of ${p.eligible} source revisions indexed (${quarantined} quarantined)`,
+		};
 	if (p.countedPoints !== p.expectedPoints)
 		return { ok: false, reason: `${p.countedPoints} points counted, ${p.expectedPoints} in the ledger` };
 	return { ok: true };

@@ -145,15 +145,37 @@ export function transition(from: FactState, d: Decision): FactState {
 }
 
 /**
- * A decision is a user's: an identity that speaks for a model or a worker
- * never decides (neither on its own proposal nor on any other), whatever
- * confidence it reports.
+ * P2.7: the verified role that confirms a project- or tenant-scoped fact
+ * (one actor's own memory needs none); roles count only from the API.
  */
-export function checkDecider(f: Pick<Fact, "origin" | "proposer">, decider: string, speaksForModel: boolean): void {
-	if (f.origin !== "user" && f.proposer === decider)
-		throw new MemoryError("FORBIDDEN", "a model or worker proposal is never decided by its proposer");
+export const confirmRole = "memory_confirmer";
+
+/** Who is asking: derived from the verified caller workload, never declared (P2.7). */
+export type DeciderKind = "user" | "model" | "worker";
+
+/**
+ * A decision is a user's (P2.7): a caller on the model or worker route never
+ * decides. Confirmation is the sensitive direction: a model or worker
+ * proposal is never confirmed by its proposer, an identity that proposes for
+ * a model or a worker never confirms, and a project- or tenant-scoped fact
+ * needs the confirm role. Removing a fact (reject, revoke, delete) is open
+ * to any user who can see it, including an identity once used for a model's
+ * proposals.
+ */
+export function checkDecider(
+	f: Pick<Fact, "origin" | "proposer" | "subjectType">,
+	decider: { actorId: string; roles: readonly string[]; kind: DeciderKind },
+	speaksForModel: boolean,
+	decision: "confirm" | "reject" | "revoke" | "delete",
+): void {
+	if (decider.kind !== "user") throw new MemoryError("FORBIDDEN", `a ${decider.kind} caller never decides a fact`);
+	if (decision !== "confirm") return;
+	if (f.origin !== "user" && f.proposer === decider.actorId)
+		throw new MemoryError("FORBIDDEN", "a model or worker proposal is never confirmed by its proposer");
 	if (speaksForModel)
-		throw new MemoryError("FORBIDDEN", "an identity that proposes for a model or a worker never decides");
+		throw new MemoryError("FORBIDDEN", "an identity that proposes for a model or a worker never confirms");
+	if (f.subjectType !== "actor" && !decider.roles.includes(confirmRole))
+		throw new MemoryError("FORBIDDEN", `confirming a ${f.subjectType} fact needs the ${confirmRole} role`);
 }
 
 /** The reviewed rule that expires confirmed facts (a policy authority, never a user or a model). */

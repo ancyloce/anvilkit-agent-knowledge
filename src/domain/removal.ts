@@ -144,3 +144,114 @@ export function restoredRemoval(f: Fact, r: RemovalRecord): Fact | undefined {
 	if (f.state === "proposed") return { ...f, state: "revoked", confirmer: r.confirmer, revision: f.revision + 1 };
 	return undefined;
 }
+
+// ---------------------------------------------------------------------------
+// P2.7: source deletions and ACL revocations
+// ---------------------------------------------------------------------------
+
+/**
+ * One source deletion or ACL revocation: the identities, the ACL revision
+ * the decision produced and the access list after it ("type:id", prefixed
+ * "manage:" for a manage entry, sorted; empty for a deletion). Never
+ * content. Keys share the memory records' layout (time-ordered under the
+ * database's scope), in the source commands' own namespace.
+ */
+export interface SourceRemovalRecord {
+	schemaVersion: 1;
+	kind: "source-removal";
+	tenantId: string;
+	commandId: string;
+	requestDigest: string;
+	sourceId: string;
+	decision: RemovalDecision;
+	decider: string;
+	aclRevision: number;
+	access: string[];
+	recordedAt: string;
+}
+
+export type AnyRemovalRecord = RemovalRecord | SourceRemovalRecord;
+
+const sourceFields = [
+	"schemaVersion",
+	"kind",
+	"tenantId",
+	"commandId",
+	"requestDigest",
+	"sourceId",
+	"decision",
+	"decider",
+	"aclRevision",
+	"access",
+	"recordedAt",
+] as const;
+
+export function sourceRemovalKeyOf(
+	scope: string,
+	r: Pick<SourceRemovalRecord, "tenantId" | "commandId" | "recordedAt">,
+): string {
+	const id = createHash("sha256")
+		.update("source")
+		.update("\0")
+		.update(r.tenantId)
+		.update("\0")
+		.update(r.commandId)
+		.digest("hex")
+		.slice(0, 32);
+	return `${removalPrefixOf(scope)}${compactTime(r.recordedAt)}/${id}.json`;
+}
+
+export function sourceRemovalBodyOf(r: SourceRemovalRecord): Buffer {
+	const ordered: Record<string, unknown> = {};
+	for (const k of sourceFields) ordered[k] = r[k];
+	return Buffer.from(JSON.stringify(ordered), "utf8");
+}
+
+export function anyRemovalBodyOf(r: AnyRemovalRecord): Buffer {
+	return r.kind === "source-removal" ? sourceRemovalBodyOf(r) : removalBodyOf(r);
+}
+
+const accessEntry = /^(tenant|project|actor|role):[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/** Parses a record of either kind listed under `key`, bound to that key and in its canonical form. */
+export function parseAnyRemoval(scope: string, key: string, bytes: Buffer): AnyRemovalRecord {
+	let raw: unknown;
+	try {
+		raw = JSON.parse(bytes.toString("utf8"));
+	} catch {
+		throw new RemovalError("a removal record is not JSON");
+	}
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new RemovalError("not an object");
+	if ((raw as Record<string, unknown>).kind !== "source-removal") return parseRemoval(scope, key, bytes);
+	const r = raw as Record<string, unknown>;
+	const keys = Object.keys(r);
+	if (keys.length !== sourceFields.length || !sourceFields.every((f) => f in r))
+		throw new RemovalError("unexpected fields");
+	const access = r.access;
+	const ok =
+		r.schemaVersion === 1 &&
+		bounded(r.tenantId) &&
+		r.tenantId !== "" &&
+		bounded(r.commandId) &&
+		r.commandId !== "" &&
+		bounded(r.requestDigest) &&
+		typeof r.sourceId === "string" &&
+		/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(r.sourceId) &&
+		(r.decision === "delete" || r.decision === "revoke") &&
+		bounded(r.decider) &&
+		r.decider !== "" &&
+		Number.isSafeInteger(r.aclRevision) &&
+		(r.aclRevision as number) >= 1 &&
+		Array.isArray(access) &&
+		access.length <= 256 &&
+		access.every((e) => typeof e === "string" && accessEntry.test(e.replace(/^manage:/, ""))) &&
+		(r.decision === "revoke" || access.length === 0) &&
+		typeof r.recordedAt === "string" &&
+		!Number.isNaN(Date.parse(r.recordedAt)) &&
+		new Date(r.recordedAt).toISOString() === r.recordedAt;
+	if (!ok) throw new RemovalError("a source removal record field is malformed");
+	const rec = r as unknown as SourceRemovalRecord;
+	if (sourceRemovalKeyOf(scope, rec) !== key) throw new RemovalError("a removal record is not bound to its key");
+	if (!sourceRemovalBodyOf(rec).equals(bytes)) throw new RemovalError("a removal record is not in its canonical form");
+	return rec;
+}
