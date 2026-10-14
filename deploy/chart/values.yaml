@@ -209,6 +209,17 @@ store:
     name: ""
     key: url
 
+# P2.7: the cleanup identity (anvilkit_knowledge_cleanup: DELETE on chunk and
+# delivery rows only) of the erasure of deleted sources and the retention of
+# delivery rows. Under secrets.provider csi: whether it is configured (its URL
+# is the cleanup-database-url key); under kubernetes cleanup.secret.name.
+# Without it nothing is erased or pruned (a warning at start).
+cleanup:
+  enabled: false
+  secret:
+    name: ""
+    key: url
+
 # The outbox forwarder sidecar: its own database identity
 # (anvilkit_knowledge_forwarder: SELECT on outbox, SELECT/INSERT/UPDATE on
 # outbox_offsets, nothing else), read from an existing Secret.

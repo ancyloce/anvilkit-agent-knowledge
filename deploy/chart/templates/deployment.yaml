@@ -133,6 +133,16 @@ spec:
                   name: {{ .Values.store.secret.name }}
                   key: {{ .Values.store.secret.key }}
             {{- end }}
+            {{- if and $csi .Values.cleanup.enabled }}
+            - name: ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL_FILE
+              value: /var/run/secrets/anvilkit/csi/cleanup-database-url
+            {{- else if and (not $csi) .Values.cleanup.secret.name }}
+            - name: ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cleanup.secret.name }}
+                  key: {{ .Values.cleanup.secret.key }}
+            {{- end }}
           ports:
             - name: grpc
               containerPort: {{ .Values.listen.port }}
