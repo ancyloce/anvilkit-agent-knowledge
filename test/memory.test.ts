@@ -136,7 +136,7 @@ describe("MemoryFact proposals", () => {
 });
 
 describe("MemoryFact decisions", () => {
-	it("never lets a model or worker identity decide: not its own proposal, not another one", async () => {
+	it("never lets a model or worker confirm: not its own proposal, not another one (P2.7: removal stays open to users)", async () => {
 		const byModel = await memory.propose(cmd(agent), agent, proposal({ subjectType: "project", subjectId: "proj_a" }));
 		expect(await code(memory.decide(cmd(agent), agent, byModel.fact.factId, 1, "confirm", "", null))).toBe("FORBIDDEN");
 		const byUser = await memory.propose(
@@ -145,7 +145,11 @@ describe("MemoryFact decisions", () => {
 			proposal({ subjectType: "project", subjectId: "proj_a", origin: "user" }),
 		);
 		expect(await code(memory.decide(cmd(agent), agent, byUser.fact.factId, 1, "confirm", "", null))).toBe("FORBIDDEN");
-		expect(await code(memory.delete(cmd(agent), agent, byUser.fact.factId, 1))).toBe("FORBIDDEN");
+		// P2.7: a caller on the model or worker route never decides anything.
+		expect(await code(memory.delete(cmd(agent), agent, byUser.fact.factId, 1, "model"))).toBe("FORBIDDEN");
+		expect(await code(memory.decide(cmd(bob), bob, byUser.fact.factId, 1, "reject", "", null, "worker"))).toBe(
+			"FORBIDDEN",
+		);
 		const worker: Scope = { ...agent, actorId: "worker-7" };
 		const byWorker = await memory.propose(
 			cmd(worker),
@@ -161,6 +165,21 @@ describe("MemoryFact decisions", () => {
 			"SELECT count(*)::int AS n FROM memory_decisions WHERE authority <> 'user' AND decision <> 'propose' AND authority <> 'policy'",
 		);
 		expect(bad.rows[0].n).toBe(0);
+		// P2.7: a user id once used for a model's proposals may still remove a fact.
+		expect((await memory.decide(cmd(agent), agent, byUser.fact.factId, 1, "reject", "", null)).fact.state).toBe(
+			"rejected",
+		);
+		// P2.7: a project or tenant fact is confirmed only under the confirm role.
+		const shared = await memory.propose(
+			cmd(bob),
+			bob,
+			proposal({ subjectType: "project", subjectId: "proj_a", origin: "user", content: "the project ships tabs" }),
+		);
+		expect(await code(memory.decide(cmd(bob), bob, shared.fact.factId, 1, "confirm", "", null))).toBe("FORBIDDEN");
+		const curator: Scope = { ...bob, roles: ["memory_confirmer"] };
+		expect((await memory.decide(cmd(curator), curator, shared.fact.factId, 1, "confirm", "", null)).fact.state).toBe(
+			"confirmed",
+		);
 		// A user proposes and confirms their own memory.
 		const own = await memory.propose(cmd(alice), alice, proposal({ origin: "user" }));
 		expect((await memory.decide(cmd(alice), alice, own.fact.factId, 1, "confirm", "", null)).fact.state).toBe(
@@ -185,20 +204,17 @@ describe("MemoryFact decisions", () => {
 			source_refs: ["src-brief@1"],
 			reason_code: "reviewed",
 		});
+		// memory.fact-confirmed left the event catalog (P2.8): the decision
+		// commits with its memory-project request, whose background.requested
+		// carries identities and digests only.
+		const facts = await inst.admin("SELECT payload::text FROM outbox WHERE payload::text LIKE '%memory.fact-%'");
+		expect(facts.rows).toHaveLength(0);
 		const events = await inst.admin(
-			"SELECT metadata::text, payload::text FROM outbox WHERE payload::text LIKE '%memory.fact-confirmed%'",
+			"SELECT payload::text FROM outbox WHERE payload::text LIKE '%anvilkit.knowledge.background.requested%'",
 		);
-		expect(events.rows.length).toBeGreaterThan(0);
-		const env = JSON.parse(
-			Buffer.from(JSON.parse(events.rows[events.rows.length - 1].payload).payload, "base64").toString(),
-		);
-		expect(env.payload).toEqual({
-			kind: "memory.fact-confirmed",
-			factId: p.fact.factId,
-			revision: "2",
-			state: "confirmed",
-		});
-		expect(JSON.stringify(env)).not.toContain("dark previews");
+		const envs = events.rows.map((r) => JSON.parse(Buffer.from(JSON.parse(r.payload).payload, "base64").toString()));
+		expect(envs.some((e) => e.payload.taskKind === "memory-project")).toBe(true);
+		for (const e of envs) expect(JSON.stringify(e)).not.toContain("dark previews");
 		const proj = await inst.admin(
 			"SELECT target::int AS target, fact_revision::int AS rev, action, state FROM memory_projections WHERE fact_id = $1",
 			[p.fact.factId],

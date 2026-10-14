@@ -141,7 +141,7 @@ beforeAll(async () => {
 		tasks,
 		() => objects,
 		() => undefined,
-		() => ({ maxSourceBytes: 1 << 20 }),
+		() => ({ maxSourceBytes: 1 << 20, uploadTtlMs: 900_000, legacyUploads: true }),
 		clock,
 		silentLogger,
 	);

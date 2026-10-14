@@ -67,4 +67,39 @@ describe("S3 objects on MinIO", () => {
 		expect((await fetch(other)).status).toBe(403);
 		expect((await fetch(get, { method: "DELETE" })).status).toBe(403);
 	});
+
+	it("P2.6: a presigned upload admits exactly the declared bytes with the signed headers", async () => {
+		const { createHash } = await import("node:crypto");
+		const http = await import("node:http");
+		const put = (url: string, headers: Record<string, string>, body: Buffer) =>
+			new Promise<number>((resolve, reject) => {
+				const req = http.request(url, { method: "PUT", headers }, (res) => {
+					res.resume();
+					res.on("end", () => resolve(res.statusCode ?? 0));
+				});
+				req.on("error", reject);
+				req.end(body);
+			});
+		const bytes = Buffer.from("# Brand\n\nTeal.\n");
+		const sha = createHash("sha256").update(bytes).digest("base64");
+		const cap = await store.presignUpload("uploads/t/upl-x", 60, {
+			sizeBytes: bytes.length,
+			mediaType: "text/markdown",
+			sha256Base64: sha,
+		});
+		expect(cap.headers).toEqual({
+			"content-length": String(bytes.length),
+			"content-type": "text/markdown",
+			"x-amz-checksum-sha256": sha,
+		});
+		const other = Buffer.from("# Brand\n\nPink.\n");
+		expect(other.length).toBe(bytes.length);
+		expect(await put(cap.url, cap.headers, other)).toBeGreaterThanOrEqual(400);
+		const { "x-amz-checksum-sha256": _, ...withoutChecksum } = cap.headers;
+		expect(await put(cap.url, withoutChecksum, bytes)).toBeGreaterThanOrEqual(400);
+		expect(await put(cap.url, { ...cap.headers, "content-type": "text/html" }, bytes)).toBeGreaterThanOrEqual(400);
+		expect(await store.size("uploads/t/upl-x")).toBeUndefined();
+		expect(await put(cap.url, cap.headers, bytes)).toBe(200);
+		expect((await store.read("uploads/t/upl-x", 100)).equals(bytes)).toBe(true);
+	});
 });

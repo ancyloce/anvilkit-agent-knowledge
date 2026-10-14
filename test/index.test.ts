@@ -195,10 +195,12 @@ describe("index entries", () => {
 		expect(e.rows[0]).toEqual({ state: "accepted", point_count: 5 });
 		const ing = await inst.admin("SELECT state FROM ingest_requests WHERE request_id = $1", [s.requestId]);
 		expect(ing.rows[0]?.state).toBe("indexed");
+		// source.revision-indexed left the event catalog (P2.8): the indexed
+		// ingest is the record, and no event is published for it.
 		const ev = await inst.admin(
 			"SELECT payload FROM outbox WHERE convert_from(decode(payload->>'payload', 'base64'), 'UTF8') LIKE '%revision-indexed%'",
 		);
-		expect(ev.rows).toHaveLength(1);
+		expect(ev.rows).toHaveLength(0);
 	});
 
 	it("rewrites a partly written, unanswered batch under the same ids and repairs missing and stray points before recording", async () => {

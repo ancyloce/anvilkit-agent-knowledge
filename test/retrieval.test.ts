@@ -385,7 +385,11 @@ describe("commercial authorization (P2.1)", () => {
 					check: async (scope, resourceType, resourceId, action) => {
 						asks.push(`${scope.tenantId}:${resourceType}:${resourceId}:${action}`);
 						if (answer === "error") throw new Error("UNAVAILABLE");
-						return { allowed: answer === "allow", revision: "rev-1", reason: answer === "deny" ? "NO_SUBSCRIPTION" : "" };
+						return {
+							allowed: answer === "allow",
+							revision: "rev-1",
+							reason: answer === "deny" ? "NO_SUBSCRIPTION" : "",
+						};
 					},
 				},
 			);

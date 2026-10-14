@@ -34,6 +34,8 @@ export interface Instance {
 	appUrl: string;
 	relayUrl: string;
 	forwarderUrl: string;
+	/** P2.7: the cleanup identity (purge and retention deletes). */
+	cleanupUrl: string;
 	/** The PostgresStore vendor migration identity and the runtime Store role (P17). */
 	storeMigratorUrl: string;
 	storeUrl: string;
@@ -60,6 +62,7 @@ export async function startInstance(): Promise<Instance> {
 		"CREATE ROLE anvilkit_knowledge_migrator LOGIN PASSWORD 'migrator'",
 		"CREATE ROLE anvilkit_knowledge_relay LOGIN PASSWORD 'relay'",
 		"CREATE ROLE anvilkit_knowledge_forwarder LOGIN PASSWORD 'forwarder'",
+		"CREATE ROLE anvilkit_knowledge_cleanup LOGIN PASSWORD 'cleanup'",
 		"CREATE ROLE anvilkit_knowledge_store_migrator LOGIN PASSWORD 'storemig'",
 		"CREATE ROLE anvilkit_knowledge_store LOGIN PASSWORD 'store'",
 		"CREATE DATABASE anvilkit_knowledge OWNER anvilkit_knowledge_migrator",
@@ -87,6 +90,7 @@ export async function startInstance(): Promise<Instance> {
 		appUrl: url("anvilkit_knowledge_app", "app"),
 		relayUrl: url("anvilkit_knowledge_relay", "relay"),
 		forwarderUrl: url("anvilkit_knowledge_forwarder", "forwarder"),
+		cleanupUrl: url("anvilkit_knowledge_cleanup", "cleanup"),
 		storeMigratorUrl: url("anvilkit_knowledge_store_migrator", "storemig"),
 		storeUrl: url("anvilkit_knowledge_store", "store"),
 		admin: (sql, params) => adminClient.query(sql, params),

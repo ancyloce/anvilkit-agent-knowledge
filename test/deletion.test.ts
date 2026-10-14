@@ -91,7 +91,9 @@ describe("deletion across every projection", () => {
 			f.factId,
 		]);
 		expect(row.rows[0]).toMatchObject({ content: "", deleted: true, purged_at: null });
-		expect((await events(f.factId)).map((e) => e.state)).toEqual(["confirmed", "deleted"]);
+		// memory.fact-confirmed/revoked left the event catalog (P2.8): the
+		// append-only decision history below is the record.
+		expect(await events(f.factId)).toEqual([]);
 		const history = await k.inst.admin(
 			"SELECT decision, authority FROM memory_decisions WHERE fact_id = $1 ORDER BY to_revision",
 			[f.factId],
@@ -159,7 +161,7 @@ describe("the reviewed expiry rule", () => {
 			decider: "policy:memory-expiry-v1",
 			policy_revision: "1",
 		});
-		expect((await events(f.factId)).map((e) => e.state)).toEqual(["confirmed", "expired"]);
+		expect(await events(f.factId)).toEqual([]);
 		await drainProjections(k);
 		expect(await k.memoryStore.get("tenant_a", f.factId)).toMatchObject({
 			revision: 3,

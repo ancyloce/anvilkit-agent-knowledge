@@ -133,8 +133,8 @@ export async function seedParsed(
 	const launchKey = `parse-${createHash("sha256").update(p.sourceId).digest("hex").slice(0, 40)}`;
 	const resultKey = `parse/${launchKey}/result.json`;
 	await inst.admin(
-		`INSERT INTO sources (source_id, tenant_id, project_id, kind, locator, current_revision, acl_revision, command_id, request_digest)
-		 VALUES ($1, $2, $3, 'document', 'upload:x.md', 1, 1, $4, $5)`,
+		`INSERT INTO sources (source_id, tenant_id, project_id, kind, locator, current_revision, acl_revision, command_id, request_digest, owner_id)
+		 VALUES ($1, $2, $3, 'document', 'upload:x.md', 1, 1, $4, $5, 'alice')`,
 		[p.sourceId, p.tenantId, projectId, `cmd-${p.sourceId}`, sha(p.sourceId)],
 	);
 	await inst.admin(

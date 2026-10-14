@@ -80,7 +80,7 @@ beforeAll(async () => {
 		tasks,
 		() => objects,
 		() => plan,
-		() => ({ maxSourceBytes: 1 << 20 }),
+		() => ({ maxSourceBytes: 1 << 20, uploadTtlMs: 900_000, legacyUploads: true }),
 		clock,
 		silentLogger,
 	);
@@ -235,16 +235,11 @@ describe("readability, access and deletion", () => {
 			"NOT_FOUND",
 		);
 
-		const before = (await eventsOf("source.authorization-revoked")).length;
 		await sources.updateAccess(cmd(alice), alice, s.sourceId, 2, [{ principalType: "actor", principalId: "alice" }]);
 		expect(await codeOf(sources.get(bob, s.sourceId))).toBe("NOT_FOUND");
-		const revoked = await eventsOf("source.authorization-revoked");
-		expect(revoked).toHaveLength(before + 1);
-		expect(revoked.at(-1)?.payload).toEqual({
-			kind: "source.authorization-revoked",
-			sourceId: s.sourceId,
-			aclRevision: "3",
-		});
+		// source.authorization-revoked left the event catalog (P2.8): the live
+		// read gate enforces the shrink and the ACL history records it.
+		expect(await eventsOf("source.authorization-revoked")).toHaveLength(0);
 		const history = await store.pool.query("SELECT acl_revision FROM source_acl_revisions WHERE source_id = $1", [
 			s.sourceId,
 		]);
@@ -261,8 +256,7 @@ describe("readability, access and deletion", () => {
 		expect(await codeOf(sources.get(alice, s.sourceId))).toBe("NOT_FOUND");
 		expect((await tasks.get(`ingest-${s.sourceId}-r1`)).state).toBe("canceled");
 		expect((await sources.delete(c, alice, s.sourceId, 1)).existing).toBe(true);
-		const revoked = await eventsOf("source.authorization-revoked");
-		expect(revoked.some((e) => e.aggregateId === s.sourceId)).toBe(true);
+		expect(await eventsOf("source.authorization-revoked")).toHaveLength(0);
 	});
 
 	it("a scope naming another project reads, changes and deletes nothing (the listing's rule)", async () => {
@@ -301,5 +295,144 @@ describe("media types", () => {
 		expect(await html("b.html", "<html lang=en><body>x</body></html>")).toBe("OK");
 		expect(await html("c.html", "<!DOCTYPE  html><body>x</body>")).toBe("SOURCE_UNVERIFIED");
 		expect(await html("d.html", "<!doctype\nhtml><body>x</body>")).toBe("SOURCE_UNVERIFIED");
+	});
+});
+
+describe("upload capability (P2.6)", () => {
+	const strict = () =>
+		new Sources(
+			store,
+			tasks,
+			() => objects,
+			() => plan,
+			() => ({ maxSourceBytes: 1 << 20, uploadTtlMs: 900_000, legacyUploads: false }),
+			clock,
+			silentLogger,
+		);
+	const declare = (text: string) => {
+		const bytes = Buffer.from(text);
+		return { bytes, contentDigest: digestOf(bytes), sizeBytes: String(bytes.length), mediaType: "text/markdown" };
+	};
+	const put = (key: string, bytes: Buffer) => objects.objects.set(key, bytes);
+	const registerUpload = (s: Sources, scope: Scope, uploadId: string, d: ReturnType<typeof declare>, c = cmd(scope)) =>
+		s.register(
+			c,
+			scope,
+			{
+				kind: "document",
+				locator: `upload:${uploadId}`,
+				contentDigest: d.contentDigest,
+				mediaType: d.mediaType,
+				sizeBytes: d.sizeBytes,
+			},
+			[],
+		);
+
+	it("issues a presigned PUT bound to the declaration; the same actor registers it once", async () => {
+		const s = strict();
+		const d = declare("# Brand guide\n\nTeal hero, single column.\n");
+		const c = cmd(alice);
+		const cap = await s.beginUpload(c, alice, d);
+		expect(cap.uploadId).toMatch(/^upl-[0-9a-f]{32}$/);
+		expect(cap.method).toBe("PUT");
+		expect(cap.headers).toEqual({
+			"content-length": d.sizeBytes,
+			"content-type": "text/markdown",
+			"x-amz-checksum-sha256": Buffer.from(d.contentDigest.slice(7), "hex").toString("base64"),
+		});
+		expect(cap.expiresAt.getTime()).toBe(clock.now().getTime() + 900_000);
+		expect(objects.uploads.get(`uploads/tenant_a/${cap.uploadId}`)?.ttlSeconds).toBe(900);
+		const again = await s.beginUpload(c, alice, d);
+		expect(again).toMatchObject({ uploadId: cap.uploadId, existing: true });
+		expect(await codeOf(s.beginUpload({ ...c, requestDigest: `sha256:${"9".repeat(64)}` }, alice, d))).toBe(
+			"COMMAND_CONFLICT",
+		);
+		put(`uploads/tenant_a/${cap.uploadId}`, d.bytes);
+		expect(await codeOf(registerUpload(s, bob, cap.uploadId, d))).toBe("SOURCE_UNVERIFIED");
+		expect(await codeOf(registerUpload(s, mallory, cap.uploadId, d))).toBe("SOURCE_UNVERIFIED");
+		const ok = await registerUpload(s, alice, cap.uploadId, d);
+		expect(ok.existing).toBe(false);
+		expect(await codeOf(registerUpload(s, alice, cap.uploadId, d))).toBe("SOURCE_UNVERIFIED");
+		const row = await store.pool.query<{ source_id: string }>(
+			"SELECT source_id FROM source_uploads WHERE upload_id = $1",
+			[cap.uploadId],
+		);
+		expect(row.rows[0]?.source_id).toBe(ok.source.sourceId);
+		expect(await codeOf(s.beginUpload(c, alice, d))).toBe("SOURCE_UNVERIFIED");
+	});
+
+	it("refuses a registration after the TTL, with another size or digest, or without a capability", async () => {
+		const s = strict();
+		const d = declare("# Tone\n\nShort sentences.\n");
+		const late = await s.beginUpload(cmd(alice), alice, d);
+		put(`uploads/tenant_a/${late.uploadId}`, d.bytes);
+		clock.advance(900_001);
+		expect(await codeOf(registerUpload(s, alice, late.uploadId, d))).toBe("SOURCE_UNVERIFIED");
+		const cap = await s.beginUpload(cmd(alice), alice, d);
+		put(`uploads/tenant_a/${cap.uploadId}`, d.bytes);
+		expect(await codeOf(registerUpload(s, alice, cap.uploadId, { ...d, sizeBytes: String(d.bytes.length + 1) }))).toBe(
+			"SOURCE_UNVERIFIED",
+		);
+		expect(
+			await codeOf(registerUpload(s, alice, cap.uploadId, { ...d, contentDigest: `sha256:${"0".repeat(64)}` })),
+		).toBe("SOURCE_UNVERIFIED");
+		const swapped = Buffer.from("# Tone\n\nLong sentences!\n");
+		put(`uploads/tenant_a/${cap.uploadId}`, swapped);
+		expect(await codeOf(registerUpload(s, alice, cap.uploadId, d))).toBe("SOURCE_UNVERIFIED");
+		const legacy = upload(alice, "fixture-direct.md", "# Direct\n");
+		expect(
+			await codeOf(
+				s.register(
+					cmd(alice),
+					alice,
+					{
+						kind: "document",
+						locator: legacy.locator,
+						contentDigest: legacy.digest,
+						mediaType: "text/markdown",
+						sizeBytes: legacy.size,
+					},
+					[],
+				),
+			),
+		).toBe("SOURCE_UNVERIFIED");
+		expect(await codeOf(s.beginUpload(cmd(alice), alice, { ...d, mediaType: "application/x-unknown" }))).toBe(
+			"UNSUPPORTED_SOURCE",
+		);
+		expect(await codeOf(s.beginUpload(cmd(alice), alice, { ...d, sizeBytes: String((1 << 20) + 1) }))).toBe(
+			"SOURCE_TOO_LARGE",
+		);
+	});
+});
+
+describe("manage permission (P2.7)", () => {
+	it("a reader neither replaces the access list nor deletes; the owner does; a manage entry grants both", async () => {
+		const reg = await register(alice, "managed.md", "# Managed\n\nOwned by alice.\n", [
+			{ principalType: "tenant", principalId: "tenant_a" },
+		] as never[]);
+		const id = reg.source.sourceId;
+		expect(reg.source.ownerId).toBe("alice");
+		expect(await codeOf(sources.get(bob, id))).toBe("OK");
+		expect(
+			await codeOf(sources.updateAccess(cmd(bob), bob, id, 1, [{ principalType: "actor", principalId: "bob" }])),
+		).toBe("FORBIDDEN");
+		expect(await codeOf(sources.delete(cmd(bob), bob, id, 1))).toBe("FORBIDDEN");
+		// The owner grants bob manage (and keeps the tenant's read).
+		const granted = await sources.updateAccess(cmd(alice), alice, id, 1, [
+			{ principalType: "tenant", principalId: "tenant_a" },
+			{ principalType: "actor", principalId: "bob", permission: "manage" },
+		]);
+		expect(granted.source.access).toContainEqual({ principalType: "actor", principalId: "bob", permission: "manage" });
+		const byBob = await sources.updateAccess(cmd(bob), bob, id, 2, [
+			{ principalType: "tenant", principalId: "tenant_a" },
+			{ principalType: "role", principalId: "curators", permission: "manage" },
+		]);
+		expect(byBob.source.aclRevision).toBe(3);
+		// A manage entry for a role is held only through verified roles.
+		const carol: Scope = { tenantId: "tenant_a", projectId: "proj_a", actorId: "carol" };
+		expect(await codeOf(sources.delete(cmd(carol), carol, id, 1))).toBe("FORBIDDEN");
+		const curator: Scope = { ...carol, roles: ["curators"] };
+		const deleted = await sources.delete(cmd(curator), curator, id, 1);
+		expect(deleted.source.deleted).toBe(true);
 	});
 });

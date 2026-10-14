@@ -47,7 +47,10 @@ async function fact(proposer: Scope, decider: Scope, over: Record<string, unknow
 		origin: "model",
 		...over,
 	} as never);
-	return (await k.memory.decide(k.cmd(decider), decider, p.fact.factId, 1, "confirm", "", null)).fact;
+	// P2.7: a project or tenant fact is confirmed under the confirm role.
+	const confirmer: Scope =
+		(over.subjectType ?? "actor") === "actor" ? decider : { ...decider, roles: ["memory_confirmer"] };
+	return (await k.memory.decide(k.cmd(confirmer), confirmer, p.fact.factId, 1, "confirm", "", null)).fact;
 }
 
 const ask = (scope: Scope, query: string, extra: Partial<RecallRequest> = {}) =>
@@ -243,5 +246,56 @@ describe("RecallFacts", () => {
 		const stranger = await ask({ tenantId: "tenant_c", projectId: "", actorId: "zed" }, "dark mode");
 		expect(stranger).toMatchObject({ facts: [], noAnswer: true });
 		expect(stranger.compute.embeddings).toBe(0);
+	});
+});
+
+describe("commercial authorization (P2.6)", () => {
+	it("refuses a recall Control denies or cannot decide before any vector is queried", async () => {
+		let queried = 0;
+		const counting = new Proxy(k.vectors, {
+			get: (target, prop, recv) =>
+				prop === "search"
+					? async (collection: string, q: HybridQuery): Promise<ScoredPoint[]> => {
+							queried++;
+							return target.search(collection, q);
+						}
+					: Reflect.get(target, prop, recv),
+		});
+		const asks: string[] = [];
+		const withControl = (answer: "allow" | "deny" | "error") => {
+			const r = new Recall(
+				k.store,
+				() => counting,
+				() => k.inference,
+				() => k.activeSpace.current,
+				() => profile,
+				() => k.bounds,
+				k.clock,
+				silentLogger,
+				k.metrics,
+			);
+			r.setDisclosure({
+				check: async (scope, resourceType, resourceId, action) => {
+					asks.push(`${scope.tenantId}:${resourceType}:${resourceId}:${action}`);
+					if (answer === "error") throw new Error("UNAVAILABLE");
+					return { allowed: answer === "allow", revision: "rev-1", reason: answer === "deny" ? "NO_SUBSCRIPTION" : "" };
+				},
+			});
+			return r;
+		};
+		const req: RecallRequest = {
+			scope: alice,
+			query: "dark mode previews",
+			maxFacts: 5,
+			retrievalProfileId: "hybrid-bge-m3-dev-v1",
+			deadline: new Date(k.clock.now().getTime() + 30_000),
+		};
+		await expect(withControl("deny").recall(req)).rejects.toMatchObject({ code: "FORBIDDEN" });
+		await expect(withControl("error").recall(req)).rejects.toMatchObject({ code: "UNAVAILABLE" });
+		expect(queried).toBe(0);
+		const allowed = await withControl("allow").recall(req);
+		expect(allowed.facts.map((f) => f.factId)).toContain(darkA);
+		expect(queried).toBe(1);
+		expect(asks[0]).toBe(`tenant_a:knowledge-memory:${alice.projectId || "tenant_a"}:read`);
 	});
 });

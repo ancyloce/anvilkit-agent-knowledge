@@ -87,6 +87,7 @@ describe("request and outbox", () => {
 		expect(row.metadata.anvilkit_event_type).toBe("background.requested");
 		expect(row.envelope.eventType).toBe("background.requested");
 		expect(row.envelope.producer).toBe("anvilkit-agent-knowledge");
+		// aggregateRevision is the generation (P2.8).
 		expect(row.envelope.aggregateRevision).toBe("1");
 		expect((row.envelope.payload as Record<string, string>).taskKind).toBe("local-check");
 		// Same input: existing, no event.
@@ -106,10 +107,13 @@ describe("request and outbox", () => {
 		// New input supersedes.
 		const next = await request("task_1", "hello-2");
 		expect(next.task.generation).toBe(2);
+		// The superseded generation is stale with no completion event
+		// (background.completed left the catalog in P2.8); the new one has its
+		// own background.requested, whose aggregateRevision is its generation.
 		rows = await outboxRows();
-		expect(rows).toHaveLength(3);
-		expect(rows[1]?.destination_topic).toBe("anvilkit.knowledge.background.completed");
-		expect(((rows[1] as OutboxRow).envelope.payload as Record<string, string>).state).toBe("stale");
+		expect(rows).toHaveLength(2);
+		expect(rows[1]?.destination_topic).toBe("anvilkit.knowledge.background.requested");
+		expect((rows[1] as OutboxRow).envelope.aggregateRevision).toBe("2");
 		const old = await store.pool.query(
 			"SELECT state FROM background_requests WHERE task_id = 'task_1' AND generation = 1",
 		);
@@ -161,10 +165,10 @@ describe("claims, fences and acceptance", () => {
 			failureCode: "",
 		});
 		expect(d.accepted).toBe(true);
+		// The accepted row is the completion record: no event (P2.8).
 		const rows = await outboxRows();
-		const last = rows[rows.length - 1] as OutboxRow;
-		expect(last.envelope.eventType).toBe("background.completed");
-		expect((last.envelope.payload as Record<string, string>).resultDigest).toBe(expected.digest);
+		expect(rows.every((r) => r.envelope.eventType === "background.requested")).toBe(true);
+		expect((await tasks.get(task.taskId)).resultDigest).toBe(expected.digest);
 		// Repeated identical submission: existing; a different one: refused.
 		const again = await tasks.submit(task.taskId, 1, {
 			workerId: "w9",
@@ -269,8 +273,9 @@ describe("claims, fences and acceptance", () => {
 		expect(c.changed).toBe(true);
 		expect(c.task.state).toBe("canceled");
 		await expect(tasks.heartbeat(task.taskId, 1, "w1")).rejects.toMatchObject({ code: "STALE_EXECUTION" });
+		// The canceled row is the record; no completion event (P2.8).
 		const rows = await outboxRows();
-		expect(((rows[rows.length - 1] as OutboxRow).envelope.payload as Record<string, string>).state).toBe("canceled");
+		expect(rows.every((r) => r.envelope.eventType === "background.requested")).toBe(true);
 	});
 });
 
