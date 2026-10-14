@@ -23,6 +23,8 @@ import {
 	BackgroundTask,
 	type BackgroundTaskServiceServer,
 	BackgroundTaskServiceService,
+	BeginUploadRequest,
+	type BeginUploadResponse,
 	Citation,
 	ClaimTaskRequest,
 	type ClaimTaskResponse,
@@ -189,7 +191,11 @@ export function sourceToProto(s: domain.Source): Source {
 		contentDigest: s.contentDigest,
 		aclRevision: String(s.aclRevision),
 		access: s.access.map((e) =>
-			AccessEntry.fromPartial({ principalType: e.principalType, principalId: e.principalId }),
+			AccessEntry.fromPartial({
+				principalType: e.principalType,
+				principalId: e.principalId,
+				permission: e.permission ?? "read",
+			}),
 		),
 		ingest: ingestTo[s.ingest],
 		deleted: s.deleted,
@@ -269,6 +275,23 @@ function commandOf(c: { tenantId: string; commandId: string; actorId: string; re
 	return { tenantId: c.tenantId, commandId: c.commandId, actorId: c.actorId, requestDigest: c.requestDigest };
 }
 
+/**
+ * P2.7: who a memory call speaks for, from the verified caller workload: the
+ * API serves people (user), the access sidecar is the model route (model),
+ * the Background Worker the worker route (worker). Without a verified
+ * caller (the DEVELOPMENT_ONLY plaintext listener) the request is a user's.
+ */
+function callerKind(): "user" | "model" | "worker" {
+	const caller = callers.getStore();
+	if (!caller) return "user";
+	if (caller.namespace === api.namespace && caller.serviceAccount === api.serviceAccount) return "user";
+	if (caller.namespace === "anvilkit-components" && caller.serviceAccount === "anvilkit-job-access-sidecar")
+		return "model";
+	if (caller.namespace === "anvilkit-apps" && caller.serviceAccount === "anvilkit-agent-background-worker")
+		return "worker";
+	return "model";
+}
+
 function scopeOf(
 	s: { tenantId: string; projectId: string; actorId: string; roles: string[] } | undefined,
 ): domain.Scope {
@@ -279,7 +302,11 @@ function scopeOf(
 }
 
 function accessOf(entries: AccessEntry[]): domain.AccessEntry[] {
-	return entries.map((e) => ({ principalType: e.principalType as domain.PrincipalType, principalId: e.principalId }));
+	return entries.map((e) => ({
+		principalType: e.principalType as domain.PrincipalType,
+		principalId: e.principalId,
+		...(e.permission === "manage" ? { permission: "manage" as const } : {}),
+	}));
 }
 
 function sequenceOf(v: string, what: string): number {
@@ -371,6 +398,8 @@ function toStatus(err: unknown): ServiceError {
 				return e(status.ALREADY_EXISTS, err.message);
 			case "REVISION_MISMATCH":
 				return e(status.FAILED_PRECONDITION, err.message);
+			case "UNAVAILABLE":
+				return e(status.UNAVAILABLE, "DEPENDENCY_UNAVAILABLE");
 			default:
 				return e(status.INVALID_ARGUMENT, err.message);
 		}
@@ -609,6 +638,27 @@ export function createGrpcServer(
 					};
 				},
 			),
+			// P2.6: the single-use upload capability of one document.
+			beginUpload: guard(
+				"anvilkit.knowledge.v1.BeginUploadRequest",
+				BeginUploadRequest.toJSON,
+				async (req): Promise<BeginUploadResponse> => {
+					const out = await sources.beginUpload(commandOf(req.command), scopeOf(req.scope), {
+						contentDigest: req.contentDigest,
+						sizeBytes: req.sizeBytes,
+						mediaType: req.mediaType,
+					});
+					return {
+						$type: "anvilkit.knowledge.v1.BeginUploadResponse",
+						uploadId: out.uploadId,
+						uploadUrl: out.url,
+						uploadMethod: out.method,
+						uploadHeaders: out.headers,
+						expiresAt: out.expiresAt,
+						existing: out.existing,
+					};
+				},
+			),
 			getSource: guard(
 				"anvilkit.knowledge.v1.GetSourceRequest",
 				GetSourceRequest.toJSON,
@@ -766,8 +816,12 @@ export function createGrpcServer(
 				"anvilkit.knowledge.v1.ProposeFactRequest",
 				ProposeFactRequest.toJSON,
 				async (req): Promise<ProposeFactResponse> => {
-					const origin = originOf[req.origin];
-					if (!origin) throw new MemoryError("INVALID_ARGUMENT", "origin");
+					const declared = originOf[req.origin];
+					if (!declared) throw new MemoryError("INVALID_ARGUMENT", "origin");
+					// P2.7: the origin is the caller's, never the request's claim.
+					const origin = callerKind();
+					if (declared !== origin)
+						throw new MemoryError("FORBIDDEN", `a ${origin} caller proposes with origin ${origin}, not ${declared}`);
 					const out = await memory.propose(commandOf(req.command), scopeOf(req.scope), {
 						subjectType: req.subjectType,
 						subjectId: req.subjectId,
@@ -797,6 +851,7 @@ export function createGrpcServer(
 						decision,
 						req.reasonCode ?? "",
 						req.expiresAt ?? null,
+						callerKind(),
 					);
 					return {
 						$type: "anvilkit.knowledge.v1.DecideFactResponse",
@@ -839,6 +894,7 @@ export function createGrpcServer(
 						scopeOf(req.scope),
 						req.factId,
 						sequenceOf(req.expectedRevision, "expected revision"),
+						callerKind(),
 					);
 					return {
 						$type: "anvilkit.knowledge.v1.DeleteFactResponse",

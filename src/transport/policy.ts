@@ -15,13 +15,17 @@ export function policy(): Policy {
 	const add = (service: string, methods: string[], ...allowed: Workload[]) => {
 		for (const m of methods) p[`/anvilkit.knowledge.v1.${service}/${m}`] = allowed;
 	};
-	add("SourceService", ["RegisterSource", "ListSources", "UpdateSourceAccess", "DeleteSource"], api);
+	add("SourceService", ["RegisterSource", "ListSources", "UpdateSourceAccess", "DeleteSource", "BeginUpload"], api);
 	// P2.2: the Workflow reads the content digest of a brief reference
 	// under the operation's own user scope (readability is still decided
 	// for that user).
 	add("SourceService", ["GetSource"], api, workflow);
 	add("SnapshotService", ["CreateSnapshot", "GetSnapshot"], api);
-	add("MemoryService", ["ProposeFact", "DecideFact", "GetFact", "ListFacts", "DeleteFact", "RecallFacts"], api);
+	add("MemoryService", ["DecideFact", "GetFact", "ListFacts", "DeleteFact", "RecallFacts"], api);
+	// P2.7: a proposal's origin is its caller's: users through the API, a
+	// model over the model route (the access sidecar), a worker over the
+	// worker route. Only users decide.
+	add("MemoryService", ["ProposeFact"], api, sidecar, backgroundWorker);
 	add("RetrievalService", ["Search"], api, sidecar);
 	// The lane: the Background Worker and the relay container of the
 	// Knowledge Pod (which carries the Pod's own workload identity).
