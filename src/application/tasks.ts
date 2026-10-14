@@ -5,7 +5,7 @@
 // original-dispatch query of an external-effect lease runs before the
 // transaction that consumes its answer.
 import * as db from "../adapters/postgres.js";
-import { completedEvent, requestedEvent } from "../domain/event.js";
+import { requestedEvent } from "../domain/event.js";
 import {
 	type Attempt,
 	attemptOutcome,
@@ -163,10 +163,9 @@ export class Tasks {
 			throw new TaskError("STALE_EXECUTION", `generation ${task.generation} of ${task.taskId} changed under the lock`);
 		if (outcome && task.attemptCount > 0)
 			await db.setAttemptOutcome(c, task.taskId, task.generation, task.attemptCount, outcome, now);
-		if (terminal(task.state)) {
-			if (task.state !== "accepted") await this.records.get(task.kind)?.onEnded(c, task);
-			await db.publishOutbox(c, completedEvent(task, now));
-		}
+		// A terminal row is its own completion record (background.completed
+		// left the event catalog in P2.8: it had no consumer).
+		if (terminal(task.state) && task.state !== "accepted") await this.records.get(task.kind)?.onEnded(c, task);
 	}
 
 	/** Cancels the latest generation of a task inside the caller's transaction (source deletion). */

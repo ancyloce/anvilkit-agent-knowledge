@@ -15,18 +15,22 @@
 // restore revived can be disclosed or written to a projection. A failed or
 // truncated listing never counts as an empty one. A database watermark
 // that moves back (a restore under a running process) closes memory again.
+
+import * as idb from "../adapters/ingestdb.js";
 import * as mdb from "../adapters/memorydb.js";
 import type * as db from "../adapters/postgres.js";
 import { RemovalConflict, type RemovalInventory, RemovalListIncomplete } from "../adapters/removals.js";
 import { MemoryError } from "../domain/memory.js";
 import {
+	type AnyRemovalRecord,
+	anyRemovalBodyOf,
 	maxRemovalBytes,
-	parseRemoval,
+	parseAnyRemoval,
 	type RemovalRecord,
-	removalBodyOf,
 	removalKeyFloor,
 	removalKeyOf,
 	removalPrefixOf,
+	type SourceRemovalRecord,
 } from "../domain/removal.js";
 import type { Logger } from "../log.js";
 import type { Metrics } from "../metrics.js";
@@ -46,6 +50,11 @@ export interface RestoreTarget {
 	applyRestored(r: RemovalRecord, key: string): Promise<RestoreOutcome>;
 }
 
+/** P2.7: the Sources use case re-applies a source deletion or revocation a restore erased. */
+export interface SourceRestoreTarget {
+	applyRestoredSource(r: SourceRemovalRecord, key: string): Promise<RestoreOutcome>;
+}
+
 export interface PassResult {
 	listed: number;
 	restored: number;
@@ -61,6 +70,7 @@ export class Removals {
 	private highWater: number | undefined;
 	private lastPass: number | undefined;
 	private target: RestoreTarget | undefined;
+	private sourceTarget: SourceRestoreTarget | undefined;
 
 	constructor(
 		private readonly store: db.Store,
@@ -73,6 +83,10 @@ export class Removals {
 
 	setTarget(t: RestoreTarget): void {
 		this.target = t;
+	}
+
+	setSourceTarget(t: SourceRestoreTarget): void {
+		this.sourceTarget = t;
 	}
 
 	/** Whether memory may serve: no inventory is placed, or a pass completed since the last restore. */
@@ -93,19 +107,28 @@ export class Removals {
 	 * Creates the record of a committed removal and marks its row recorded.
 	 * Unplaced, the row stays pending (recorded once an inventory is placed).
 	 */
-	async record(r: RemovalRecord, key: string): Promise<void> {
+	async record(r: AnyRemovalRecord, key: string): Promise<void> {
 		const inv = this.inventory();
 		if (!inv) return;
 		try {
-			await inv.create(key, removalBodyOf(r));
+			await inv.create(key, anyRemovalBodyOf(r));
 		} catch (err) {
 			this.metrics.memoryRemovals.inc({ outcome: err instanceof RemovalConflict ? "conflict" : "uncertain" });
 			if (err instanceof RemovalConflict)
-				this.log.error("removal record conflict: another record exists under its key", { factId: r.factId });
+				this.log.error("removal record conflict: another record exists under its key", {
+					...(r.kind === "source-removal" ? { sourceId: r.sourceId } : { factId: r.factId }),
+				});
 			throw err;
 		}
-		await mdb.markRemovalRecorded(this.store.pool, r.tenantId, r.commandId);
+		if (r.kind === "source-removal") await idb.markSourceRemovalRecorded(this.store.pool, r.tenantId, r.commandId);
+		else await mdb.markRemovalRecorded(this.store.pool, r.tenantId, r.commandId);
 		this.metrics.memoryRemovals.inc({ outcome: "recorded" });
+	}
+
+	/** P2.7: a replayed source deletion or revocation completes its record if it is still pending. */
+	async ensureSourceRecorded(tenantId: string, commandId: string): Promise<void> {
+		const row = await idb.sourceRemovalByCommand(this.store.pool, tenantId, commandId);
+		if (row?.state === "pending" && row.inventoryKey) await this.record(row.record, row.inventoryKey);
 	}
 
 	/** A replayed removal command completes its record if it is still pending. */
@@ -166,7 +189,12 @@ export class Removals {
 				const bytes = await inv.read(key, maxRemovalBytes);
 				// Records are immutable: a listed record that cannot be read leaves the window incomplete.
 				if (!bytes) throw new RemovalListIncomplete("a listed removal record is missing");
-				const outcome = await target.applyRestored(parseRemoval(scope, key, bytes), key);
+				const rec = parseAnyRemoval(scope, key, bytes);
+				let outcome: RestoreOutcome;
+				if (rec.kind === "source-removal") {
+					if (!this.sourceTarget) throw new Error("no source restore target wired");
+					outcome = await this.sourceTarget.applyRestoredSource(rec, key);
+				} else outcome = await target.applyRestored(rec, key);
 				if (outcome !== "known") {
 					out.restored++;
 					this.metrics.memoryRemovals.inc({ outcome: "restored" });
@@ -191,6 +219,18 @@ export class Removals {
 				out.recorded++;
 			} catch (err) {
 				this.log.warn("a pending removal record is not confirmed yet", {
+					error: err instanceof Error ? err.name : String(err),
+				});
+				break;
+			}
+		}
+		for (const row of await idb.pendingSourceRemovals(this.store.pool, grace, 100)) {
+			if (!row.inventoryKey) continue;
+			try {
+				await this.record(row.record, row.inventoryKey);
+				out.recorded++;
+			} catch (err) {
+				this.log.warn("a pending source removal record is not confirmed yet", {
 					error: err instanceof Error ? err.name : String(err),
 				});
 				break;

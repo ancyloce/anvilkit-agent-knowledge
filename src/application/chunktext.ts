@@ -5,13 +5,21 @@
 // one operation; it caches the result objects it has read.
 
 import type { ChunkRow } from "../adapters/ingestdb.js";
-import { strictJson } from "../adapters/jobcontract.js";
-import type { ObjectStore } from "../adapters/objects.js";
+import { ContractViolation, strictJson } from "../adapters/jobcontract.js";
+import { ObjectMissing, type ObjectStore, ObjectTooLarge } from "../adapters/objects.js";
 import type { ParseResult } from "../domain/parse.js";
 import { digestOf } from "../domain/task.js";
 
 /** A chunk whose stored text does not prove its recorded digest (or cannot be read). */
 export class ChunkUnverified extends Error {}
+
+/**
+ * P2.7: the parse result could not be read right now (the store answered
+ * 5xx, timed out or was unreachable): the batch is asked again, the entry
+ * does not fail. A missing or oversized result or one that does not parse
+ * stays ChunkUnverified.
+ */
+export class ChunkUnavailable extends Error {}
 
 export class ChunkTexts {
 	private readonly results = new Map<string, Promise<ParseResult>>();
@@ -41,7 +49,9 @@ export class ChunkTexts {
 			r = await this.result(key);
 		} catch (err) {
 			this.results.delete(key);
-			throw new ChunkUnverified(`chunk ${chunk.chunkId}: ${String(err).slice(0, 120)}`);
+			if (err instanceof ObjectMissing || err instanceof ObjectTooLarge || err instanceof ContractViolation)
+				throw new ChunkUnverified(`chunk ${chunk.chunkId}: ${String(err).slice(0, 120)}`);
+			throw new ChunkUnavailable(`chunk ${chunk.chunkId}: ${String(err).slice(0, 120)}`);
 		}
 		const c = r.chunks?.[ordinal];
 		if (

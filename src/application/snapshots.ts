@@ -13,12 +13,29 @@ import { type Command, checkCommand, principalsOf, type Scope, SourceError } fro
 import type { Logger } from "../log.js";
 
 export class Snapshots {
+	private open: () => boolean = () => true;
+
 	constructor(
 		private readonly store: db.Store,
 		private readonly log: Logger,
 	) {}
 
+	/**
+	 * P2.7: closed while the removal inventory is not reconciled (after a
+	 * restore, a source deletion or revocation the database lost is not yet
+	 * re-applied, so nothing it covered may be read).
+	 */
+	setGate(open: () => boolean): void {
+		this.open = open;
+	}
+
+	private gate(): void {
+		if (!this.open())
+			throw new RetrievalError("UNAVAILABLE", "sources are closed until the removal inventory is reconciled");
+	}
+
 	async create(cmd: Command, scope: Scope, sourceIds: string[]): Promise<{ snapshot: Snapshot; existing: boolean }> {
+		this.gate();
 		try {
 			checkCommand(cmd, scope);
 		} catch (err) {
@@ -86,6 +103,7 @@ export class Snapshots {
 
 	/** The snapshot of the caller's tenant (and project) with only the sources the caller can read now. */
 	async get(scope: Scope, snapshotId: string): Promise<Snapshot> {
+		this.gate();
 		const s = await rdb.getSnapshot(this.store.pool, snapshotId);
 		if (!s || s.tenantId !== scope.tenantId || (scope.projectId && s.projectId !== scope.projectId))
 			throw new RetrievalError("NOT_FOUND", "snapshot");

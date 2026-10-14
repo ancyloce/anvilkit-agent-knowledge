@@ -109,9 +109,31 @@ export class Retrieval {
 		private readonly disclosure?: Disclosure,
 	) {}
 
+	private open: () => boolean = () => true;
+	private indexHealthy: () => boolean = () => true;
+
+	/** P2.7: the Index Builder's last count check of the accepted generation. */
+	setIndexHealth(healthy: () => boolean): void {
+		this.indexHealthy = healthy;
+	}
+
+	/**
+	 * P2.7: closed while the removal inventory is not reconciled (after a
+	 * restore, a source deletion or revocation the database lost is not yet
+	 * re-applied, so nothing it covered may be read).
+	 */
+	setGate(open: () => boolean): void {
+		this.open = open;
+	}
+
 	async search(req: SearchRequest): Promise<SearchResult> {
 		const started = Date.now();
 		try {
+			if (!this.open())
+				throw new RetrievalError("UNAVAILABLE", "sources are closed until the removal inventory is reconciled");
+			// P2.7: a lost index is an error, never an empty answer.
+			if (!this.indexHealthy())
+				throw new RetrievalError("UNAVAILABLE", "the accepted index is missing document points (count check)");
 			const out = await this.run(req);
 			this.metrics.retrievalCompute.inc({ kind: "query_embeddings" }, out.compute.embeddings);
 			this.metrics.retrievalCompute.inc({ kind: "rerank_candidates" }, out.compute.rerankCandidates);

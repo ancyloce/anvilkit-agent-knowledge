@@ -24,11 +24,12 @@ import { type Filter, type HybridQuery, type VectorIndex, VectorUnavailable } fr
 import * as rdb from "../adapters/retrievaldb.js";
 import { type SpaceProfile, sameSpace, vectorNames } from "../domain/index.js";
 import { type Fact, MemoryError, memoryKeyOf, parseSourceRef } from "../domain/memory.js";
-import { type RetrievalProfile, stableOrder } from "../domain/retrieval.js";
+import { RetrievalError, type RetrievalProfile, stableOrder } from "../domain/retrieval.js";
 import { principalsOf, type Scope } from "../domain/source.js";
 import type { Logger } from "../log.js";
 import type { Metrics } from "../metrics.js";
 import type { MemoryBounds } from "./memory.js";
+import { type Disclosure, requireDisclosure } from "./retrieval.js";
 import type { Clock } from "./tasks.js";
 
 export interface RecallRequest {
@@ -49,6 +50,7 @@ export interface RecallResult {
 
 export class Recall {
 	private open: () => boolean = () => true;
+	private disclosure: Disclosure | undefined;
 
 	constructor(
 		private readonly store: db.Store,
@@ -65,6 +67,16 @@ export class Recall {
 	/** P23: nothing is recalled while the removal inventory is not reconciled. */
 	setGate(open: () => boolean): void {
 		this.open = open;
+	}
+
+	/**
+	 * P2.6: Control's commercial authorization of a recall's disclosure,
+	 * asked before any vector or fact is read (resource knowledge-memory of
+	 * the scope's project, or its tenant); a denial is FORBIDDEN, an
+	 * unreachable decision UNAVAILABLE.
+	 */
+	setDisclosure(d: Disclosure | undefined): void {
+		this.disclosure = d;
 	}
 
 	async recall(req: RecallRequest): Promise<RecallResult> {
@@ -114,6 +126,18 @@ export class Recall {
 			throw new MemoryError("PROFILE_UNQUALIFIED", `retrieval profile ${req.retrievalProfileId}`);
 		const now = this.clock.now().getTime();
 		if (req.deadline.getTime() <= now) throw new MemoryError("DEADLINE_EXCEEDED", "deadline passed");
+		try {
+			await requireDisclosure(
+				this.disclosure,
+				req.scope,
+				"knowledge-memory",
+				req.scope.projectId || req.scope.tenantId,
+			);
+		} catch (err) {
+			if (err instanceof RetrievalError)
+				throw new MemoryError(err.code === "FORBIDDEN" ? "FORBIDDEN" : "UNAVAILABLE", err.message);
+			throw err;
+		}
 		const deadline = Math.min(req.deadline.getTime(), now + profile.maxDeadlineMs);
 		const inTime = () => {
 			if (this.clock.now().getTime() >= deadline) throw new MemoryError("DEADLINE_EXCEEDED", "deadline passed");

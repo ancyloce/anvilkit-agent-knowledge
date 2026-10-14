@@ -24,7 +24,6 @@ import * as idb from "../adapters/ingestdb.js";
 import type { ObjectStore } from "../adapters/objects.js";
 import * as db from "../adapters/postgres.js";
 import { type Filter, type Point, type VectorIndex, VectorUnavailable } from "../adapters/qdrant.js";
-import { sourceIndexedEvent } from "../domain/event.js";
 import {
 	collectionOf,
 	type IndexEntry,
@@ -47,7 +46,7 @@ import {
 import type { Submission, Task } from "../domain/task.js";
 import type { Logger } from "../log.js";
 import type { Metrics } from "../metrics.js";
-import { ChunkTexts, ChunkUnverified } from "./chunktext.js";
+import { ChunkTexts, ChunkUnavailable, ChunkUnverified } from "./chunktext.js";
 import type { Clock, PreparedResult, ResultRecords, Tasks } from "./tasks.js";
 
 export type IndexAnswer =
@@ -59,6 +58,12 @@ export interface IndexSettings {
 	batchSize: number;
 	maxResultBytes: number;
 	pollMs: number;
+	/** P2.7: attempts of one entry before it is quarantined (index.max_attempts). */
+	maxAttempts?: number;
+	/** P2.7: how long a failed entry rests before its next attempt (index.retry_delay). */
+	retryDelayMs?: number;
+	/** P2.7: how often the accepted generation's points are counted against its ledger (index.count_check_interval). */
+	countCheckIntervalMs?: number;
 }
 
 /** The parsed revision whose accepted chunks become index entries. */
@@ -167,7 +172,11 @@ export class Indexer implements ResultRecords {
 	}
 
 	private async fail(entry: IndexEntry, code: string): Promise<IndexAnswer> {
-		await idx.updateEntry(this.store.pool, entry.taskId, { state: "failed", failureCode: code });
+		await idx.updateEntry(this.store.pool, entry.taskId, {
+			state: "failed",
+			failureCode: code,
+			failedAt: this.clock.now(),
+		});
 		this.metrics.indexBatches.inc({ outcome: "failed" });
 		return { state: "failed", failureCode: code };
 	}
@@ -228,6 +237,12 @@ export class Indexer implements ResultRecords {
 			try {
 				batch = await Promise.all(rows.map((r) => texts.text(r)));
 			} catch (err) {
+				// P2.7: a store that did not answer is asked again; only bytes
+				// that do not prove their chunk fail the entry.
+				if (err instanceof ChunkUnavailable) {
+					this.log.warn("chunk text unavailable; asked again", { taskId, reason: err.message });
+					return this.retry("retry");
+				}
 				if (err instanceof ChunkUnverified) {
 					this.log.warn("chunk text unverified", { taskId, reason: err.message });
 					return this.fail(entry, indexFailure.chunkUnverified);
@@ -350,38 +365,33 @@ export class Indexer implements ResultRecords {
 			throw new IndexError("STALE_EXECUTION", "the index entry changed after its preparation");
 		await idx.updateEntry(c, task.taskId, { state: "accepted" });
 		const g = await idx.getGeneration(c, entry.generation);
-		if (g?.state === "accepted") await this.markIndexed(c, entry, g.generation, task.tenantId, task.correlationId);
+		if (g?.state === "accepted") await this.markIndexed(c, entry);
 	}
 
-	/** The ingest becomes indexed once its revision is readable through the accepted generation. */
-	private async markIndexed(
-		c: db.PoolClient,
-		entry: Pick<IndexEntry, "ingestRequestId" | "sourceId" | "sourceRevision">,
-		generation: number,
-		tenantId: string,
-		correlationId: string,
-	): Promise<void> {
-		const r = await c.query(
+	/**
+	 * The ingest becomes indexed once its revision is readable through the
+	 * accepted generation (source.revision-indexed left the event catalog in
+	 * P2.8: snapshots read the accepted entries themselves).
+	 */
+	private async markIndexed(c: db.PoolClient, entry: Pick<IndexEntry, "ingestRequestId">): Promise<void> {
+		await c.query(
 			"UPDATE ingest_requests SET state = 'indexed', updated_at = now() WHERE request_id = $1 AND state = 'indexing'",
 			[entry.ingestRequestId],
 		);
-		if ((r.rowCount ?? 0) === 1)
-			await db.publishOutbox(
-				c,
-				sourceIndexedEvent(
-					{ sourceId: entry.sourceId, tenantId, sourceRevision: entry.sourceRevision, indexGeneration: generation },
-					correlationId,
-					this.clock.now(),
-				),
-			);
 	}
 
 	async onEnded(c: db.PoolClient, task: Task): Promise<void> {
 		const entry = await idx.getEntryByTask(c, task.taskId, true);
 		if (!entry || entry.state === "accepted" || entry.state === "stale") return;
+		// P2.7: a generation a retry superseded no longer owns the entry (the
+		// retry reset it in the same transaction and its next generation does).
+		if (task.state === "stale" && task.failureCode === "SUPERSEDED") return;
+		const latest = await db.getLatestRequest(c, task.taskId);
+		if (latest && latest.generation > task.generation) return;
 		await idx.updateEntry(c, task.taskId, {
 			state: task.state === "stale" || task.state === "canceled" ? "stale" : "failed",
 			failureCode: task.failureCode || task.state.toUpperCase(),
+			failedAt: this.clock.now(),
 		});
 	}
 
@@ -403,6 +413,96 @@ export class Indexer implements ResultRecords {
 	) => Promise<{ ok: true } | { ok: false; reason: string }>;
 	setMemoryGate(gate: NonNullable<Indexer["memoryGate"]>): void {
 		this.memoryGate = gate;
+	}
+
+	private reparse: (() => Promise<number>) | undefined;
+
+	/** P2.7: the re-ingest of a parser or chunker change (Sources.requestReparse). */
+	setReparse(fn: () => Promise<number>): void {
+		this.reparse = fn;
+	}
+
+	private missing = 0;
+	private lastCount = Number.NEGATIVE_INFINITY;
+
+	/** P2.7: whether the accepted generation holds every document point its ledger expects (the last count). */
+	documentsHealthy(): boolean {
+		return this.missing === 0;
+	}
+
+	/**
+	 * P2.7: counts the accepted generation's document points against its
+	 * ledger. Fewer points than the ledger (a deleted or emptied collection)
+	 * is surfaced as a metric and an error, search answers UNAVAILABLE instead
+	 * of an empty answer, and the collection is ensured again on the next pass
+	 * (knowledgectl rebuild documents writes the points again). More points
+	 * than the ledger is a revision being written, not a loss.
+	 */
+	async checkCount(vectors: VectorIndex, g: IndexGeneration): Promise<number> {
+		this.lastCount = this.clock.now().getTime();
+		const expected = await idx.ledgerPoints(this.store.pool, g.generation);
+		let counted: number;
+		try {
+			counted = await vectors.count(g.collectionName, {
+				must: [],
+				must_not: [{ key: "kind", match: { value: "memory" } }],
+			});
+		} catch (err) {
+			if (!(err instanceof VectorUnavailable)) throw err;
+			counted = 0;
+		}
+		this.missing = Math.max(0, expected - counted);
+		this.metrics.indexPointsMissing.set(this.missing);
+		if (this.missing > 0) {
+			this.ensured.delete(g.collectionName);
+			this.log.error("accepted index generation is missing document points", {
+				generation: g.generation,
+				expected,
+				counted,
+			});
+		}
+		return this.missing;
+	}
+
+	/**
+	 * P2.7: the document rebuild of a generation (knowledgectl rebuild
+	 * documents): every live entry of a current revision is written again from
+	 * its first chunk as a new task generation; the Background Worker does the
+	 * work and the entries are accepted again.
+	 */
+	async rebuildDocuments(generation: number): Promise<number> {
+		const g = await idx.getGeneration(this.store.pool, generation);
+		if (!g || g.state === "retired") throw new IndexError("NOT_FOUND", `index generation ${generation}`);
+		return this.store.inTx(async (c) => {
+			const entries = await idx.resetForRebuild(c, generation);
+			for (const f of entries) {
+				const input: IndexInput = {
+					schemaVersion: 1,
+					computation: indexProfile,
+					attempt: f.attempts + 1,
+					sourceId: f.sourceId,
+					sourceRevision: f.sourceRevision,
+					ingestRequestId: f.ingestRequestId,
+					indexGeneration: g.generation,
+					chunkCount: f.chunkCount,
+					embeddingProfile: g.embeddingProfile,
+					modelRevision: g.modelRevision,
+				};
+				await this.tasks.requestIn(c, {
+					taskId: f.taskId,
+					tenantId: f.tenantId,
+					kind: "knowledge-project",
+					profile: indexProfile,
+					input: JSON.stringify(input),
+					effects: "reconstructible",
+					dispatchId: "",
+					authorizationRef: `source:${f.sourceId}`,
+					correlationId: `index-rebuild-${g.generation}`,
+				});
+			}
+			this.log.info("document rebuild requested", { generation, entries: entries.length });
+			return entries.length;
+		});
 	}
 
 	/** Records a new building generation for the active space (a rebuild when one already serves it). */
@@ -440,18 +540,84 @@ export class Indexer implements ResultRecords {
 			this.ensured.add(g.collectionName);
 		}
 		await this.purge(vectors, gens);
+		// P2.7: a generation of a new chunker first has every indexed revision
+		// parsed under it (the re-ingest), then indexes and qualifies.
+		if (this.reparse && gens.some((x) => x.state === "building" || x.state === "materialized"))
+			await this.reparse().catch((err) =>
+				this.log.warn("re-ingest not requested", { error: String(err).slice(0, 200) }),
+			);
 		for (const g of gens.filter((x) => x.state === "building" || x.state === "materialized")) {
 			await this.backfill(g);
+			await this.retryFailed(g);
 			await this.qualify(vectors, g);
 		}
 		gens = await idx.listGenerations(this.store.pool);
 		const accepted = gens.find((g) => g.state === "accepted");
 		if (accepted) await vectors.switchAlias(accepted.collectionName);
+		if (accepted && this.clock.now().getTime() - this.lastCount >= (this.settings().countCheckIntervalMs ?? 600_000))
+			await this.checkCount(vectors, accepted);
 		for (const s of ["building", "materialized", "accepted", "retired"] as const)
 			this.metrics.indexGeneration.set(
 				{ state: s },
 				Math.max(0, ...gens.filter((g) => g.state === s).map((g) => g.generation)),
 			);
+	}
+
+	/**
+	 * P2.7: a failed entry of a revision that is still eligible rests for
+	 * index.retry_delay and is then attempted again as a new task generation
+	 * (from its first chunk), up to index.max_attempts; an entry that
+	 * exhausted them is quarantined, so it no longer holds the generation
+	 * back (it is counted, logged and surfaced as a metric instead).
+	 */
+	async retryFailed(g: IndexGeneration): Promise<void> {
+		const max = this.settings().maxAttempts ?? 3;
+		const before = new Date(this.clock.now().getTime() - (this.settings().retryDelayMs ?? 300_000));
+		for (const f of await idx.failedEligible(this.store.pool, g, before, 50)) {
+			if (f.attempts >= max) {
+				if (await idx.quarantineEntry(this.store.pool, f.taskId)) {
+					this.metrics.indexBatches.inc({ outcome: "quarantined" });
+					this.log.warn("index entry quarantined", {
+						taskId: f.taskId,
+						attempts: f.attempts,
+						failureCode: f.failureCode,
+					});
+				}
+				continue;
+			}
+			await this.store.inTx(async (c) => {
+				if (!(await idx.retryEntry(c, f.taskId, f.attempts))) return;
+				const input: IndexInput = {
+					schemaVersion: 1,
+					computation: indexProfile,
+					attempt: f.attempts + 1,
+					sourceId: f.sourceId,
+					sourceRevision: f.sourceRevision,
+					ingestRequestId: f.ingestRequestId,
+					indexGeneration: g.generation,
+					chunkCount: f.chunkCount,
+					embeddingProfile: g.embeddingProfile,
+					modelRevision: g.modelRevision,
+				};
+				await this.tasks.requestIn(c, {
+					taskId: f.taskId,
+					tenantId: f.tenantId,
+					kind: "knowledge-project",
+					profile: indexProfile,
+					input: JSON.stringify(input),
+					effects: "reconstructible",
+					dispatchId: "",
+					authorizationRef: `source:${f.sourceId}`,
+					correlationId: `index-retry-${g.generation}`,
+				});
+			});
+			this.metrics.indexBatches.inc({ outcome: "retried" });
+			this.log.info("index entry attempted again", {
+				taskId: f.taskId,
+				attempt: f.attempts + 1,
+				failureCode: f.failureCode,
+			});
+		}
 	}
 
 	/** Every eligible revision of a generation that has no entry yet gets one (idempotent). */
@@ -518,14 +684,7 @@ export class Indexer implements ResultRecords {
 				 WHERE e.generation = $1 AND e.state = 'accepted'`,
 				[g.generation],
 			);
-			for (const x of r.rows)
-				await this.markIndexed(
-					c,
-					{ ingestRequestId: x.ingest_request_id, sourceId: x.source_id, sourceRevision: Number(x.source_revision) },
-					g.generation,
-					x.tenant_id,
-					`index-generation-${g.generation}`,
-				);
+			for (const x of r.rows) await this.markIndexed(c, { ingestRequestId: x.ingest_request_id });
 		});
 		this.log.info("index generation accepted", { generation: g.generation });
 	}

@@ -5,9 +5,9 @@
 // that speaks for a model or a worker never decides. A confirmation binds
 // the provenance the decider can read now at its current revision, the
 // expiry and the conflict rule (one live confirmed fact per content,
-// subject and scope). The fact, its append-only decision, its outbox event
-// and the durable memory-project requests of every projection target
-// commit together; the projections (the PostgresStore and every vector
+// subject and scope). The fact, its append-only decision and the durable
+// memory-project requests of every projection target (with their
+// background.requested events) commit together; the projections (the PostgresStore and every vector
 // generation) follow from those requests and never decide anything. A
 // deletion or revocation also commits its removal row and is answered only
 // once its record is in the removal inventory (removals.ts), which outlives
@@ -15,13 +15,13 @@
 // reconciled.
 import * as idx from "../adapters/indexdb.js";
 import * as mdb from "../adapters/memorydb.js";
-import * as db from "../adapters/postgres.js";
+import type * as db from "../adapters/postgres.js";
 import * as rdb from "../adapters/retrievaldb.js";
-import { memoryFactEvent } from "../domain/event.js";
 import { type SpaceProfile, sameSpace } from "../domain/index.js";
 import {
 	checkDecider,
 	contentDigestOf,
+	type DeciderKind,
 	type Decision,
 	expiryPolicy,
 	type Fact,
@@ -271,6 +271,7 @@ export class Memory {
 		decision: Decision,
 		reasonCode: string,
 		expiresAt: Date | null,
+		decider: DeciderKind = "user",
 	): Promise<{ fact: Fact; existing: boolean }> {
 		this.gate();
 		commandOf(cmd, scope);
@@ -287,7 +288,12 @@ export class Memory {
 			fact = await this.store.inTx(async (c) => {
 				const f = await mdb.getFact(c, factId, true);
 				if (!f || !visible(f, scope)) throw new MemoryError("NOT_FOUND", "fact");
-				checkDecider(f, scope.actorId, await mdb.speaksForModel(c, scope.tenantId, scope.actorId));
+				checkDecider(
+					f,
+					{ actorId: scope.actorId, roles: scope.roles ?? [], kind: decider },
+					await mdb.speaksForModel(c, scope.tenantId, scope.actorId),
+					decision,
+				);
 				if (f.revision !== expectedRevision)
 					throw new MemoryError("REVISION_MISMATCH", `fact revision is ${f.revision}`);
 				const next: Fact = { ...f, state: transition(f.state, decision), revision: f.revision + 1 };
@@ -320,11 +326,6 @@ export class Memory {
 					commandId: cmd.commandId,
 					requestDigest: cmd.requestDigest,
 				});
-				if (decision !== "reject")
-					await db.publishOutbox(
-						c,
-						memoryFactEvent(next, decision === "confirm" ? "confirmed" : "revoked", cmd.commandId, now),
-					);
 				await this.scheduleIn(c, next);
 				if (decision === "revoke") removal = await this.removalIn(c, cmd, f, next, "revoke", reasonCode);
 				return next;
@@ -360,6 +361,7 @@ export class Memory {
 		scope: Scope,
 		factId: string,
 		expectedRevision: number,
+		decider: DeciderKind = "user",
 	): Promise<{ fact: Fact; existing: boolean }> {
 		this.gate();
 		commandOf(cmd, scope);
@@ -374,7 +376,12 @@ export class Memory {
 			fact = await this.store.inTx(async (c) => {
 				const f = await mdb.getFact(c, factId, true);
 				if (!f || !visible(f, scope)) throw new MemoryError("NOT_FOUND", "fact");
-				checkDecider(f, scope.actorId, await mdb.speaksForModel(c, scope.tenantId, scope.actorId));
+				checkDecider(
+					f,
+					{ actorId: scope.actorId, roles: scope.roles ?? [], kind: decider },
+					await mdb.speaksForModel(c, scope.tenantId, scope.actorId),
+					"delete",
+				);
 				if (f.revision !== expectedRevision)
 					throw new MemoryError("REVISION_MISMATCH", `fact revision is ${f.revision}`);
 				const now = this.clock.now();
@@ -397,7 +404,6 @@ export class Memory {
 					commandId: cmd.commandId,
 					requestDigest: cmd.requestDigest,
 				});
-				if (f.state === "confirmed") await db.publishOutbox(c, memoryFactEvent(next, "deleted", cmd.commandId, now));
 				await this.scheduleIn(c, next);
 				// Never projected: nothing to clear.
 				await mdb.markPurgedIfComplete(c, f.factId);
@@ -455,7 +461,6 @@ export class Memory {
 					commandId,
 					requestDigest: digestOf(commandId),
 				});
-				await db.publishOutbox(c, memoryFactEvent(next, "expired", expiryPolicy.id, now));
 				await this.scheduleIn(c, next);
 				return true;
 			});
@@ -545,11 +550,6 @@ export class Memory {
 				commandId: r.commandId,
 				requestDigest: r.requestDigest,
 			});
-			if (r.decision === "revoke" || f.state === "confirmed")
-				await db.publishOutbox(
-					c,
-					memoryFactEvent(next, r.decision === "delete" ? "deleted" : "revoked", r.commandId, this.clock.now()),
-				);
 			await this.scheduleIn(c, next);
 			if (next.deleted) await mdb.markPurgedIfComplete(c, f.factId);
 			return "restored";
