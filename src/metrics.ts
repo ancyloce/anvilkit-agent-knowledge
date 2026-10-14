@@ -22,6 +22,8 @@ export class Metrics {
 	readonly sourceCommands: Counter<"command" | "outcome">;
 	readonly indexBatches: Counter<"outcome">;
 	readonly indexGeneration: Gauge<"state">;
+	/** P2.7: document points the accepted generation's ledger expects that its collection does not hold. */
+	readonly indexPointsMissing: Gauge;
 	readonly searches: Counter<"outcome">;
 	readonly searchSeconds: Histogram;
 	readonly withheld: Counter<"stage">;
@@ -130,6 +132,11 @@ export class Metrics {
 			name: "anvilkit_knowledge_index_batches_total",
 			help: "Index Builder steps by outcome (written, verified, rewrite, retry, materialized, failed).",
 			labelNames: ["outcome"],
+			registers: r,
+		});
+		this.indexPointsMissing = new Gauge({
+			name: "anvilkit_knowledge_index_points_missing",
+			help: "Document points the accepted generation's ledger expects that its collection does not hold (the periodic count check; the whole ledger when the collection is gone).",
 			registers: r,
 		});
 		this.indexGeneration = new Gauge({

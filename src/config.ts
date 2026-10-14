@@ -56,7 +56,15 @@ export interface Config {
 	health: { listen: string };
 	/** Spans over OTLP/HTTP to the collector when placed (none otherwise), sampled at sampleRatio; read at process start. */
 	telemetry: { otlpEndpoint: string; sampleRatio: number };
-	database: { url: string; urlFile: string; maxConn: number };
+	/** P2.7: connectTimeoutMs/statementTimeoutMs/idleTimeoutMs bound every connection (database.connect_timeout, statement_timeout, idle_timeout). */
+	database: {
+		url: string;
+		urlFile: string;
+		maxConn: number;
+		connectTimeoutMs: number;
+		statementTimeoutMs: number;
+		idleTimeoutMs: number;
+	};
 	tasks: {
 		maxInputBytes: number;
 		maxLeaseMs: number;
@@ -74,8 +82,11 @@ export interface Config {
 		accessKeyId: string;
 		secretAccessKey: string;
 		credentialsFile: string;
+		/** P2.7: the bound of one object-store operation (objects.request_timeout). */
+		requestTimeoutMs: number;
 	};
-	sources: { maxBytes: number };
+	/** P2.6: uploadTtlMs bounds an upload capability (sources.upload_ttl). */
+	sources: { maxBytes: number; uploadTtlMs: number };
 	parser: {
 		profile: string;
 		namespace: string;
@@ -114,6 +125,11 @@ export interface Config {
 		maxResultBytes: number;
 		pollMs: number;
 		qualifyIntervalMs: number;
+		/** P2.7: attempts of one index entry before it is quarantined, and the rest between them. */
+		maxAttempts: number;
+		retryDelayMs: number;
+		/** P2.7: how often the accepted generation's points are counted against its ledger. */
+		countCheckIntervalMs: number;
 	};
 	retrieval: {
 		profileId: string;
@@ -128,6 +144,22 @@ export interface Config {
 		maxDeadlineMs: number;
 	};
 	store: { url: string; schema: string; maxConn: number };
+	/**
+	 * P2.7: the cleanup identity (anvilkit_knowledge_cleanup; cleanup.url or
+	 * cleanup.url_file, environment only) and its work: the erasure of deleted
+	 * sources and the retention of delivery rows, every intervalMs on the one
+	 * replica that holds the reconciler lock. Unplaced: nothing is erased or
+	 * pruned (a warning says so).
+	 */
+	cleanup: {
+		url: string;
+		intervalMs: number;
+		batch: number;
+		outboxRetentionMs: number;
+		inboxRetentionMs: number;
+		attemptsRetentionMs: number;
+		launchesRetentionMs: number;
+	};
 	memory: { maxAllowedFacts: number; maxProjectionEpochs: number; retryDelayMs: number };
 	/**
 	 * The removal inventory in the independent DR store (P23): its own
@@ -195,6 +227,8 @@ const envOverrides: Record<string, string> = {
 	ANVILKIT_KNOWLEDGE_QDRANT_API_KEY_FILE: "qdrant.api_key_file",
 	ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL: "store.url",
 	ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL_FILE: "store.url_file",
+	ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL: "cleanup.url",
+	ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL_FILE: "cleanup.url_file",
 	ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT: "removals.endpoint",
 	ANVILKIT_KNOWLEDGE_REMOVALS_ACCESS_KEY_ID: "removals.access_key_id",
 	ANVILKIT_KNOWLEDGE_REMOVALS_SECRET_ACCESS_KEY: "removals.secret_access_key",
@@ -207,6 +241,7 @@ const secretKeys = [
 	"objects.secret_access_key",
 	"qdrant.api_key",
 	"store.url",
+	"cleanup.url",
 	"removals.access_key_id",
 	"removals.secret_access_key",
 ];
@@ -224,6 +259,7 @@ const placementKeys = [
 	"qdrant.url",
 	"qdrant.api_key_file",
 	"store.url_file",
+	"cleanup.url_file",
 	"removals.endpoint",
 	"removals.credentials_file",
 ];
@@ -267,12 +303,12 @@ const defaults: Raw = {
 	},
 	health: { listen: "127.0.0.1:9115" },
 	telemetry: { sample_ratio: 1 },
-	database: { max_conn: 8 },
+	database: { max_conn: 8, connect_timeout: "10s", statement_timeout: "30s", idle_timeout: "30s" },
 	tasks: { max_input_bytes: 65536, max_lease: "10m", retry_delay: "5s", max_attempts: 3, sweep_interval: "2s" },
 	outbox: { consumer_group: "anvilkit-agent-knowledge-forwarder" },
 	control: { timeout: "5s", identity: { mode: "mtls", server_name: "anvilkit-agent-control" } },
-	objects: { bucket: "anvilkit-knowledge", region: "us-east-1" },
-	sources: { max_bytes: 33554432 },
+	objects: { bucket: "anvilkit-knowledge", region: "us-east-1", request_timeout: "30s" },
+	sources: { max_bytes: 33554432, upload_ttl: "15m" },
 	parser: {
 		profile: "",
 		namespace: "anvilkit-parsing",
@@ -302,9 +338,12 @@ const defaults: Raw = {
 	index: {
 		sparse_profile: "bge-m3-lexical-v1",
 		batch_size: 16,
-		max_result_bytes: 16777216,
+		max_result_bytes: 33554432,
 		poll_interval: "200ms",
 		qualify_interval: "2s",
+		max_attempts: 3,
+		retry_delay: "5m",
+		count_check_interval: "10m",
 	},
 	retrieval: {
 		profile_id: "",
@@ -319,6 +358,14 @@ const defaults: Raw = {
 		max_deadline: "60s",
 	},
 	store: { schema: "memory_store", max_conn: 4 },
+	cleanup: {
+		interval: "10m",
+		batch: 1000,
+		outbox_retention: "168h",
+		inbox_retention: "720h",
+		attempts_retention: "720h",
+		launches_retention: "720h",
+	},
 	memory: { max_allowed_facts: 1024, max_projection_epochs: 5, retry_delay: "30s" },
 	removals: {
 		bucket: "anvilkit-memory-removals",
@@ -356,6 +403,9 @@ const known = new Set([
 	"database.url",
 	"database.url_file",
 	"database.max_conn",
+	"database.connect_timeout",
+	"database.statement_timeout",
+	"database.idle_timeout",
 	"tasks.max_input_bytes",
 	"tasks.max_lease",
 	"tasks.retry_delay",
@@ -367,11 +417,13 @@ const known = new Set([
 	"objects.endpoint",
 	"objects.stage_endpoint",
 	"objects.bucket",
+	"objects.request_timeout",
 	"objects.region",
 	"objects.access_key_id",
 	"objects.secret_access_key",
 	"objects.credentials_file",
 	"sources.max_bytes",
+	"sources.upload_ttl",
 	"parser.profile",
 	"parser.namespace",
 	"parser.node_pool",
@@ -403,6 +455,9 @@ const known = new Set([
 	"index.max_result_bytes",
 	"index.poll_interval",
 	"index.qualify_interval",
+	"index.max_attempts",
+	"index.retry_delay",
+	"index.count_check_interval",
 	"retrieval.profile_id",
 	"retrieval.dense_limit",
 	"retrieval.sparse_limit",
@@ -413,6 +468,14 @@ const known = new Set([
 	"retrieval.max_allowed_sources",
 	"retrieval.min_rerank_score",
 	"retrieval.max_deadline",
+	"cleanup.url",
+	"cleanup.url_file",
+	"cleanup.interval",
+	"cleanup.batch",
+	"cleanup.outbox_retention",
+	"cleanup.inbox_retention",
+	"cleanup.attempts_retention",
+	"cleanup.launches_retention",
 	"store.url",
 	"store.url_file",
 	"store.schema",
@@ -959,6 +1022,10 @@ function validate(raw: Raw): Config {
 	if (storeUrl && !/^postgres(ql)?:\/\//.test(storeUrl)) errors.push("store.url must be a postgres URL");
 	const storeTls = storeUrl && !development ? postgresTlsError("store.url", storeUrl) : undefined;
 	if (storeTls) errors.push(storeTls);
+	const cleanupUrl = secretFrom(raw, "cleanup.url", "cleanup.url_file", errors);
+	if (cleanupUrl && !/^postgres(ql)?:\/\//.test(cleanupUrl)) errors.push("cleanup.url must be a postgres URL");
+	const cleanupTls = cleanupUrl && !development ? postgresTlsError("cleanup.url", cleanupUrl) : undefined;
+	if (cleanupTls) errors.push(cleanupTls);
 	const minScoreText = attempt(() => str(raw, "retrieval.min_rerank_score"), "0");
 	const minScore = Number(minScoreText);
 	if (!/^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(minScoreText) || !Number.isFinite(minScore))
@@ -982,7 +1049,14 @@ function validate(raw: Raw): Config {
 		},
 		health: { listen: health },
 		telemetry: { otlpEndpoint, sampleRatio },
-		database: { url, urlFile, maxConn: attempt(() => int(raw, "database.max_conn", 1, 256), 8) },
+		database: {
+			url,
+			urlFile,
+			maxConn: attempt(() => int(raw, "database.max_conn", 1, 256), 8),
+			connectTimeoutMs: attempt(() => duration(raw, "database.connect_timeout", 1_000, 60_000), 10_000),
+			statementTimeoutMs: attempt(() => duration(raw, "database.statement_timeout", 1_000, 600_000), 30_000),
+			idleTimeoutMs: attempt(() => duration(raw, "database.idle_timeout", 1_000, 600_000), 30_000),
+		},
 		tasks: {
 			maxInputBytes: attempt(() => int(raw, "tasks.max_input_bytes", 1, 65536), 65536),
 			maxLeaseMs: maxLease,
@@ -1004,8 +1078,12 @@ function validate(raw: Raw): Config {
 			accessKeyId,
 			secretAccessKey,
 			credentialsFile,
+			requestTimeoutMs: attempt(() => duration(raw, "objects.request_timeout", 1_000, 300_000), 30_000),
 		},
-		sources: { maxBytes: attempt(() => int(raw, "sources.max_bytes", 1, 268_435_456), 33_554_432) },
+		sources: {
+			maxBytes: attempt(() => int(raw, "sources.max_bytes", 1, 268_435_456), 33_554_432),
+			uploadTtlMs: attempt(() => duration(raw, "sources.upload_ttl", 60_000, 3_600_000), 900_000),
+		},
 		parser: {
 			profile: parserProfile,
 			namespace: attempt(() => str(raw, "parser.namespace"), ""),
@@ -1043,9 +1121,12 @@ function validate(raw: Raw): Config {
 		index: {
 			sparseProfile: attempt(() => str(raw, "index.sparse_profile"), ""),
 			batchSize: attempt(() => int(raw, "index.batch_size", 1, 128), 16),
-			maxResultBytes: attempt(() => int(raw, "index.max_result_bytes", 1024, 268_435_456), 16_777_216),
+			maxResultBytes: attempt(() => int(raw, "index.max_result_bytes", 1024, 268_435_456), 33_554_432),
 			pollMs: attempt(() => duration(raw, "index.poll_interval", 0, 60_000), 200),
 			qualifyIntervalMs: attempt(() => duration(raw, "index.qualify_interval", 100, 600_000), 2000),
+			maxAttempts: attempt(() => int(raw, "index.max_attempts", 1, 20), 3),
+			retryDelayMs: attempt(() => duration(raw, "index.retry_delay", 0, 86_400_000), 300_000),
+			countCheckIntervalMs: attempt(() => duration(raw, "index.count_check_interval", 1_000, 86_400_000), 600_000),
 		},
 		retrieval: {
 			profileId: attempt(() => str(raw, "retrieval.profile_id"), ""),
@@ -1058,6 +1139,21 @@ function validate(raw: Raw): Config {
 			maxAllowedSources: attempt(() => int(raw, "retrieval.max_allowed_sources", 1, 4096), 256),
 			minRerankScore: minScore,
 			maxDeadlineMs: attempt(() => duration(raw, "retrieval.max_deadline", 100, 600_000), 60_000),
+		},
+		cleanup: {
+			url: cleanupUrl,
+			intervalMs: attempt(() => duration(raw, "cleanup.interval", 10_000, 86_400_000), 600_000),
+			batch: attempt(() => int(raw, "cleanup.batch", 1, 100_000), 1000),
+			outboxRetentionMs: attempt(() => duration(raw, "cleanup.outbox_retention", 60_000, 31_536_000_000), 604_800_000),
+			inboxRetentionMs: attempt(() => duration(raw, "cleanup.inbox_retention", 60_000, 31_536_000_000), 2_592_000_000),
+			attemptsRetentionMs: attempt(
+				() => duration(raw, "cleanup.attempts_retention", 60_000, 31_536_000_000),
+				2_592_000_000,
+			),
+			launchesRetentionMs: attempt(
+				() => duration(raw, "cleanup.launches_retention", 60_000, 31_536_000_000),
+				2_592_000_000,
+			),
 		},
 		store: {
 			url: storeUrl,

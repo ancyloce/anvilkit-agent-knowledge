@@ -69,6 +69,8 @@ export interface Runtime {
 	memoryStore?: MemoryStorePort;
 	/** P23: the removal inventory in the independent DR store. */
 	removals?: RemovalInventory;
+	/** P2.7: the cleanup identity's pool (erasure and retention deletes). */
+	cleanup?: pg.Pool;
 }
 
 /**
@@ -76,6 +78,18 @@ export interface Runtime {
  * store, Kubernetes client and reviewed parser profile; any failure closes
  * what was built and rejects the generation.
  */
+/**
+ * P2.7: every accepted parse result is readable by the indexer and
+ * retrieval (index.max_result_bytes at least the parser profile's
+ * maxOutputBytes), or one revision would fail forever at its size.
+ */
+export function checkResultBound(maxResultBytes: number, parser: ParserProfile | undefined): void {
+	if (parser && maxResultBytes < parser.parser.maxOutputBytes)
+		throw new Error(
+			`index.max_result_bytes ${maxResultBytes} is below the parser profile's maxOutputBytes ${parser.parser.maxOutputBytes}`,
+		);
+}
+
 export async function buildRuntime(gen: Generation, previous?: Runtime): Promise<Runtime> {
 	const c = gen.config;
 	// The identity watcher outlives generations: the files are placements
@@ -94,6 +108,9 @@ export async function buildRuntime(gen: Generation, previous?: Runtime): Promise
 	let kube: Kube | undefined;
 	try {
 		parser = c.parser.profile ? admitParserProfile(parserProfile(c.parser.profile), c.development.enabled) : undefined;
+		// P2.7: every accepted parse result is readable by the indexer and
+		// retrieval, or one revision fails forever at its size.
+		checkResultBound(c.index.maxResultBytes, parser);
 		kube = c.parser.profile ? new KubeClient(loadKubeConfig(c.parser.kubeconfig), c.parser.kubeTimeoutMs) : undefined;
 	} catch (err) {
 		throw new Error(`parser launcher: ${err instanceof Error ? err.message : String(err)}`);
@@ -106,6 +123,7 @@ export async function buildRuntime(gen: Generation, previous?: Runtime): Promise
 				region: c.objects.region,
 				accessKeyId: c.objects.accessKeyId,
 				secretAccessKey: c.objects.secretAccessKey,
+				requestTimeoutMs: c.objects.requestTimeoutMs,
 			})
 		: undefined;
 	const inf = c.inference;
@@ -148,7 +166,22 @@ export async function buildRuntime(gen: Generation, previous?: Runtime): Promise
 				timeoutMs: rm.timeoutMs,
 			})
 		: undefined;
-	const pool = newPool(gen.config.database.url, gen.config.database.maxConn);
+	const db = gen.config.database;
+	const pool = newPool(
+		db.url,
+		db.maxConn,
+		{
+			connectTimeoutMs: db.connectTimeoutMs,
+			statementTimeoutMs: db.statementTimeoutMs,
+			idleTimeoutMs: db.idleTimeoutMs,
+			idleInTransactionTimeoutMs: Math.max(db.statementTimeoutMs * 2, 60_000),
+		},
+		// P2.7: an idle client's failure is reported, the pool replaces it.
+		(err) =>
+			process.stderr.write(
+				`${JSON.stringify({ level: "warn", msg: "database client error", error: err.message.slice(0, 200) })}\n`,
+			),
+	);
 	try {
 		const client = await pool.connect();
 		try {
@@ -164,7 +197,16 @@ export async function buildRuntime(gen: Generation, previous?: Runtime): Promise
 		kube?.close();
 		throw new Error(`database probe: ${err instanceof Error ? err.message : String(err)}`);
 	}
-	return { gen, pool, identity, objects, kube, parser, inference, vectors, memoryStore, removals };
+	// P2.7: the cleanup identity's own small pool, when placed.
+	const cleanup = gen.config.cleanup.url
+		? newPool(gen.config.cleanup.url, 2, {
+				connectTimeoutMs: db.connectTimeoutMs,
+				statementTimeoutMs: db.statementTimeoutMs,
+				idleTimeoutMs: db.idleTimeoutMs,
+				idleInTransactionTimeoutMs: Math.max(db.statementTimeoutMs * 2, 60_000),
+			})
+		: undefined;
+	return { gen, pool, identity, objects, kube, parser, inference, vectors, memoryStore, removals, cleanup };
 }
 
 /** Drains the pool within the limit; reports whether the limit cut it short. */
@@ -181,6 +223,7 @@ export async function retire(rt: Runtime, limitMs: number): Promise<boolean> {
 	rt.kube?.close();
 	rt.vectors?.close();
 	rt.removals?.close();
+	await rt.cleanup?.end().catch(() => undefined);
 	await rt.memoryStore?.close().catch(() => undefined);
 	return forced;
 }

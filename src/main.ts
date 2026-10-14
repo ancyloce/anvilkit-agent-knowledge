@@ -10,6 +10,7 @@ import { collectDefaultMetrics, Registry } from "prom-client";
 import { ControlDisclosure, ControlDispatchQuery } from "./adapters/control.js";
 import type { ParserProfile } from "./adapters/jobcontract.js";
 import { Store } from "./adapters/postgres.js";
+import { Cleanup, reconcilerLock, withLock } from "./application/cleanup.js";
 import { Indexer } from "./application/indexer.js";
 import { Ingest, planOf } from "./application/ingest.js";
 import { Memory } from "./application/memory.js";
@@ -27,7 +28,7 @@ import { jsonLogger, type Logger } from "./log.js";
 import { Metrics } from "./metrics.js";
 import { Telemetry } from "./telemetry.js";
 import { createGrpcServer } from "./transport/grpc.js";
-import { createHealthServer, listen } from "./transport/health.js";
+import { createHealthServer, DependencyProbe, listen } from "./transport/health.js";
 import { clientCredentials, clientOptions } from "./transport/identity.js";
 import { policy } from "./transport/policy.js";
 
@@ -102,7 +103,11 @@ export async function start(
 			const p = gens.runtime()?.parser;
 			return p ? planOf(p) : undefined;
 		},
-		() => ({ maxSourceBytes: active().sources.maxBytes }),
+		() => ({
+			maxSourceBytes: active().sources.maxBytes,
+			uploadTtlMs: active().sources.uploadTtlMs,
+			legacyUploads: active().development.enabled,
+		}),
 		systemClock,
 		log,
 	);
@@ -138,7 +143,14 @@ export async function start(
 		() => spaceOf(active(), gens.runtime()?.parser),
 		() => {
 			const i = active().index;
-			return { batchSize: i.batchSize, maxResultBytes: i.maxResultBytes, pollMs: i.pollMs };
+			return {
+				batchSize: i.batchSize,
+				maxResultBytes: i.maxResultBytes,
+				pollMs: i.pollMs,
+				maxAttempts: i.maxAttempts,
+				retryDelayMs: i.retryDelayMs,
+				countCheckIntervalMs: i.countCheckIntervalMs,
+			};
 		},
 		systemClock,
 		log,
@@ -150,8 +162,32 @@ export async function start(
 	if (!cfg.parser.profile)
 		log.warn("no parser profile: sources are refused and ingest tasks fail (parser.profile unset)");
 	let ready = false;
-	const health = createHealthServer(registry, () => ready && tasks.ready());
+	// P2.7: readiness follows the database (a paused or unreachable server
+	// drops it; the first answering check restores it).
+	const database = new DependencyProbe(
+		async () => {
+			await store.pool.query("SELECT 1");
+		},
+		5_000,
+		3_000,
+	);
+	database.start();
+	const health = createHealthServer(registry, () => ready && tasks.ready() && database.healthy());
 	const snapshots = new Snapshots(store, log);
+	// P2.7: erasure of deleted sources and delivery retention (cleanup identity).
+	const cleanup = new Cleanup(
+		store,
+		() => gens.runtime()?.cleanup,
+		() => gens.runtime()?.objects,
+		() => ({ ...active().cleanup, consumerGroup: active().outbox.consumerGroup }),
+		systemClock,
+		log,
+		metrics,
+	);
+	if (!cfg.cleanup.url)
+		log.warn(
+			"no cleanup identity: deleted sources are not erased and delivery rows are not pruned (cleanup.url unset)",
+		);
 	const retrieval = new Retrieval(
 		store,
 		() => gens.runtime()?.vectors,
@@ -209,6 +245,8 @@ export async function start(
 		log,
 		metrics,
 	);
+	// P2.6: Control's commercial authorization of every recall's disclosure.
+	recall.setDisclosure(disclosure);
 	// P23: removals outlive a restore of the database; memory serves once
 	// the removal inventory is reconciled.
 	const removals = new Removals(
@@ -221,6 +259,14 @@ export async function start(
 	);
 	memory.setRemovals(removals);
 	recall.setGate(() => removals.ready());
+	// P2.7: source deletions and revocations share the inventory; source
+	// reads, snapshots and search close with memory until it is reconciled.
+	sources.setRemovals(removals);
+	removals.setSourceTarget(sources);
+	retrieval.setGate(() => removals.ready());
+	retrieval.setIndexHealth(() => indexer.documentsHealthy());
+	indexer.setReparse(() => sources.requestReparse(50));
+	snapshots.setGate(() => removals.ready());
 	projector.setGate(() => removals.ready());
 	if (!cfg.removals.endpoint)
 		log.warn(
@@ -269,24 +315,45 @@ export async function start(
 				await tasks.observe(cfg.outbox.consumerGroup);
 			});
 		}, cfg.tasks.sweepIntervalMs);
+		// P2.7: the shared passes run on one replica (a session advisory lock
+		// held for the pass; the others skip it until the lock is free): index
+		// generations, the erasure of deleted sources, delivery retention,
+		// memory expiry and projections. The removal inventory pass runs on
+		// every replica: each one's memory gate is its own.
+		let lastRetention = 0;
+		const shared = () =>
+			indexer
+				.reconcile()
+				.catch((err) => log.warn("index reconciliation failed", { error: String(err) }))
+				.then(async () => {
+					await cleanup.purgeDeleted(20);
+					if (Date.now() - lastRetention >= active().cleanup.intervalMs) {
+						lastRetention = Date.now();
+						await cleanup.retain();
+					}
+				})
+				.catch((err) => log.warn("cleanup pass failed", { error: String(err).slice(0, 200) }))
+				.then(async () => {
+					if (!removals.ready()) return;
+					await memory.expireDue(100);
+					await projector.reconcile();
+				})
+				.catch((err) => log.warn("memory reconciliation failed", { error: String(err) }));
 		const reconcile = () => {
 			reconciling = reconciling.then(() =>
-				indexer
-					.reconcile()
-					.catch((err) => log.warn("index reconciliation failed", { error: String(err) }))
-					.then(() => removals.tick())
+				removals
+					.tick()
 					.catch((err) =>
 						log.warn("removal inventory not reconciled", {
 							error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
 							memory: removals.ready() ? "serving" : "closed",
 						}),
 					)
-					.then(async () => {
-						if (!removals.ready()) return;
-						await memory.expireDue(100);
-						await projector.reconcile();
-					})
-					.catch((err) => log.warn("memory reconciliation failed", { error: String(err) })),
+					.then(() => withLock(store.pool, reconcilerLock, shared))
+					.then(
+						() => undefined,
+						(err) => log.warn("reconciler lock not taken", { error: String(err).slice(0, 200) }),
+					),
 			);
 		};
 		// The first removal pass runs before serving, within a bound: memory
@@ -320,6 +387,7 @@ export async function start(
 		if (reconciler) clearInterval(reconciler);
 		if (watcher) clearInterval(watcher);
 		await grpc.stop(0).catch(() => undefined);
+		database.stop();
 		health.close();
 		await retire(rt, cfg.reload.drainLimitMs);
 		if (dispatch instanceof ControlDispatchQuery) dispatch.close();
@@ -351,6 +419,7 @@ export async function start(
 			if (reconciler) clearInterval(reconciler);
 			if (watcher) clearInterval(watcher);
 			await Promise.all([sweeping, watching, reconciling]).catch(() => undefined);
+			database.stop();
 			const forcedDrain = await gens.shutdown(cfg.reload.drainLimitMs);
 			if (dispatch instanceof ControlDispatchQuery) dispatch.close();
 			metrics.drainSeconds.set((Date.now() - begin) / 1000);
