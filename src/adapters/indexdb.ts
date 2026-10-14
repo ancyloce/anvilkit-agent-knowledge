@@ -193,13 +193,17 @@ export async function acceptedEntries(
 export async function updateEntry(
 	c: Queryable,
 	taskId: string,
-	change: Partial<Pick<IndexEntry, "state" | "writtenThrough" | "pointCount" | "manifestDigest" | "failureCode">>,
+	change: Partial<Pick<IndexEntry, "state" | "writtenThrough" | "pointCount" | "manifestDigest" | "failureCode">> & {
+		/** P2.7: when a failure happened (the indexer's clock; the database's otherwise). */
+		failedAt?: Date;
+	},
 	readWrittenThrough?: number,
 ): Promise<number> {
 	const r = await c.query(
 		`UPDATE index_entries SET state = COALESCE($2, state), written_through = COALESCE($3, written_through),
 		   point_count = COALESCE($4, point_count), manifest_digest = COALESCE($5, manifest_digest),
-		   failure_code = COALESCE($6, failure_code), updated_at = now()
+		   failure_code = COALESCE($6, failure_code),
+		   failed_at = CASE WHEN $2 = 'failed' THEN COALESCE($8::timestamptz, now()) ELSE failed_at END, updated_at = now()
 		 WHERE task_id = $1 AND ($7::int IS NULL OR written_through = $7)`,
 		[
 			taskId,
@@ -209,6 +213,7 @@ export async function updateEntry(
 			change.manifestDigest || null,
 			change.failureCode || null,
 			readWrittenThrough ?? null,
+			change.failedAt ?? null,
 		],
 	);
 	return r.rowCount ?? 0;
@@ -350,12 +355,27 @@ export interface Progress {
 	accepted: number;
 	open: number;
 	failed: number;
+	/** P2.7: revisions whose entry exhausted its attempts (no points, not blocking). */
+	quarantined: number;
+	/**
+	 * P2.7: live current revisions indexed under another chunker whose parse
+	 * under this generation's chunker is not requested yet or still running:
+	 * the generation does not qualify before they can be indexed in it.
+	 */
+	waiting: number;
 	expectedPoints: number;
 }
 
 /** What a building generation still lacks, counted over eligible revisions only. */
 export async function progressOf(c: Queryable, g: IndexGeneration): Promise<Progress> {
-	const r = await c.query<{ eligible: string; accepted: string; open: string; failed: string; points: string }>(
+	const r = await c.query<{
+		eligible: string;
+		accepted: string;
+		open: string;
+		failed: string;
+		quarantined: string;
+		points: string;
+	}>(
 		`WITH eligible AS (
 		   SELECT i.source_id, i.source_revision FROM ingest_requests i
 		   JOIN sources s ON s.source_id = i.source_id AND s.current_revision = i.source_revision
@@ -365,10 +385,20 @@ export async function progressOf(c: Queryable, g: IndexGeneration): Promise<Prog
 		   count(*) FILTER (WHERE e.state = 'accepted')::text AS accepted,
 		   count(*) FILTER (WHERE e.state IN ('pending', 'running', 'materialized'))::text AS open,
 		   count(*) FILTER (WHERE e.state = 'failed')::text AS failed,
+		   count(*) FILTER (WHERE e.state = 'quarantined')::text AS quarantined,
 		   COALESCE(sum(e.point_count) FILTER (WHERE e.state = 'accepted'), 0)::text AS points
 		 FROM index_entries e JOIN eligible x ON x.source_id = e.source_id AND x.source_revision = e.source_revision
 		 WHERE e.generation = $1`,
 		[g.generation, g.chunkerProfile, g.chunkerRevision],
+	);
+	const w = await c.query<{ n: string }>(
+		`SELECT count(DISTINCT s.source_id)::text AS n FROM sources s
+		 JOIN ingest_requests i ON i.source_id = s.source_id AND i.source_revision = s.current_revision
+		 WHERE NOT s.deleted AND i.state IN ('indexing', 'indexed')
+		   AND NOT (i.chunker_profile = $1 AND i.chunker_revision = $2)
+		   AND NOT EXISTS (SELECT 1 FROM ingest_requests j WHERE j.source_id = s.source_id AND j.source_revision = s.current_revision
+		                   AND j.chunker_profile = $1 AND j.chunker_revision = $2 AND j.state IN ('indexing', 'indexed', 'failed', 'stale'))`,
+		[g.chunkerProfile, g.chunkerRevision],
 	);
 	const x = r.rows[0];
 	return {
@@ -376,6 +406,8 @@ export async function progressOf(c: Queryable, g: IndexGeneration): Promise<Prog
 		accepted: Number(x?.accepted ?? 0),
 		open: Number(x?.open ?? 0),
 		failed: Number(x?.failed ?? 0),
+		quarantined: Number(x?.quarantined ?? 0),
+		waiting: Number(w.rows[0]?.n ?? 0),
 		expectedPoints: Number(x?.points ?? 0),
 	};
 }
@@ -407,4 +439,168 @@ export async function unpurged(c: Queryable, limit: number): Promise<string[]> {
 
 export async function markPurged(c: Queryable, sourceId: string): Promise<void> {
 	await c.query("UPDATE sources SET points_purged_at = now() WHERE source_id = $1 AND deleted", [sourceId]);
+}
+
+// P2.7: retries and quarantine of failed entries.
+
+export interface FailedEntry {
+	taskId: string;
+	sourceId: string;
+	sourceRevision: number;
+	ingestRequestId: string;
+	tenantId: string;
+	chunkCount: number;
+	attempts: number;
+	failureCode: string;
+}
+
+/**
+ * Failed entries of a generation whose revision is still eligible (current,
+ * not deleted, parsed with the generation's chunker), failed before `before`.
+ */
+export async function failedEligible(
+	c: Queryable,
+	g: IndexGeneration,
+	before: Date,
+	limit: number,
+): Promise<FailedEntry[]> {
+	const r = await c.query<{
+		task_id: string;
+		source_id: string;
+		source_revision: string;
+		ingest_request_id: string;
+		tenant_id: string;
+		chunk_count: number;
+		attempts: number;
+		failure_code: string | null;
+	}>(
+		`SELECT e.task_id, e.source_id, e.source_revision::text, e.ingest_request_id, s.tenant_id, e.chunk_count, e.attempts, e.failure_code
+		 FROM index_entries e
+		 JOIN sources s ON s.source_id = e.source_id AND s.current_revision = e.source_revision AND NOT s.deleted
+		 JOIN ingest_requests i ON i.request_id = e.ingest_request_id AND i.chunker_profile = $2 AND i.chunker_revision = $3
+		 WHERE e.generation = $1 AND e.state = 'failed' AND COALESCE(e.failed_at, e.updated_at) < $4
+		 ORDER BY e.failed_at NULLS FIRST, e.task_id LIMIT $5`,
+		[g.generation, g.chunkerProfile, g.chunkerRevision, before, limit],
+	);
+	return r.rows.map((x) => ({
+		taskId: x.task_id,
+		sourceId: x.source_id,
+		sourceRevision: Number(x.source_revision),
+		ingestRequestId: x.ingest_request_id,
+		tenantId: x.tenant_id,
+		chunkCount: x.chunk_count,
+		attempts: x.attempts,
+		failureCode: x.failure_code ?? "",
+	}));
+}
+
+/** A failed entry starts its next attempt from the first chunk (false when it changed meanwhile). */
+export async function retryEntry(c: PoolClient, taskId: string, attempts: number): Promise<boolean> {
+	const r = await c.query(
+		`UPDATE index_entries SET state = 'pending', written_through = 0, failure_code = NULL, failed_at = NULL,
+		   attempts = attempts + 1, updated_at = now()
+		 WHERE task_id = $1 AND state = 'failed' AND attempts = $2`,
+		[taskId, attempts],
+	);
+	return (r.rowCount ?? 0) === 1;
+}
+
+/** A failed entry that exhausted its attempts is quarantined with its failure. */
+export async function quarantineEntry(c: Queryable, taskId: string): Promise<boolean> {
+	const r = await c.query(
+		"UPDATE index_entries SET state = 'quarantined', updated_at = now() WHERE task_id = $1 AND state = 'failed'",
+		[taskId],
+	);
+	return (r.rowCount ?? 0) === 1;
+}
+
+/** P2.7: the document points a generation's ledger holds (its accepted entries). */
+export async function ledgerPoints(c: Queryable, generation: number): Promise<number> {
+	const r = await c.query<{ n: string }>(
+		"SELECT COALESCE(sum(point_count), 0)::text AS n FROM index_entries WHERE generation = $1 AND state = 'accepted'",
+		[generation],
+	);
+	return Number(r.rows[0]?.n ?? 0);
+}
+
+/**
+ * P2.7: every live entry of a generation of a still-current, undeleted
+ * revision starts again from its first chunk (the document rebuild); answers
+ * the entries to request again.
+ */
+export async function resetForRebuild(c: PoolClient, generation: number): Promise<FailedEntry[]> {
+	const r = await c.query<{
+		task_id: string;
+		source_id: string;
+		source_revision: string;
+		ingest_request_id: string;
+		tenant_id: string;
+		chunk_count: number;
+		attempts: number;
+		failure_code: string | null;
+	}>(
+		`UPDATE index_entries e SET state = 'pending', written_through = 0, point_count = NULL, manifest_digest = NULL,
+		   failure_code = NULL, failed_at = NULL, attempts = e.attempts + 1, updated_at = now()
+		 FROM sources s
+		 WHERE e.generation = $1 AND s.source_id = e.source_id AND s.current_revision = e.source_revision AND NOT s.deleted
+		   AND e.state IN ('accepted', 'materialized', 'failed', 'quarantined')
+		 RETURNING e.task_id, e.source_id, e.source_revision::text, e.ingest_request_id, s.tenant_id, e.chunk_count, e.attempts, e.failure_code`,
+		[generation],
+	);
+	return r.rows.map((x) => ({
+		taskId: x.task_id,
+		sourceId: x.source_id,
+		sourceRevision: Number(x.source_revision),
+		ingestRequestId: x.ingest_request_id,
+		tenantId: x.tenant_id,
+		chunkCount: x.chunk_count,
+		attempts: x.attempts - 1,
+		failureCode: x.failure_code ?? "",
+	}));
+}
+
+/**
+ * P2.7: live current revisions indexed under another chunker that have no
+ * parse request under this plan's parser and chunker (the re-ingest of a
+ * chunker change), with what a request needs.
+ */
+export async function reparseCandidates(
+	c: Queryable,
+	plan: { parserProfile: string; parserProfileRevision: number; chunkerProfile: string; chunkerRevision: number },
+	limit: number,
+): Promise<
+	{
+		sourceId: string;
+		revision: number;
+		tenantId: string;
+		contentDigest: string;
+		sizeBytes: number;
+		mediaType: string;
+	}[]
+> {
+	const r = await c.query<{
+		source_id: string;
+		revision: string;
+		tenant_id: string;
+		content_digest: string;
+		size_bytes: string;
+		media_type: string;
+	}>(
+		`SELECT DISTINCT s.source_id, s.current_revision::text AS revision, s.tenant_id, v.content_digest, v.size_bytes::text, v.media_type
+		 FROM sources s JOIN source_revisions v ON v.source_id = s.source_id AND v.revision = s.current_revision
+		 JOIN ingest_requests i ON i.source_id = s.source_id AND i.source_revision = s.current_revision AND i.state IN ('indexing', 'indexed')
+		 WHERE NOT s.deleted AND NOT (i.chunker_profile = $3 AND i.chunker_revision = $4)
+		   AND NOT EXISTS (SELECT 1 FROM ingest_requests j WHERE j.source_id = s.source_id AND j.source_revision = s.current_revision
+		                   AND j.parser_profile = $1 AND j.parser_profile_revision = $2 AND j.chunker_profile = $3 AND j.chunker_revision = $4)
+		 ORDER BY s.source_id LIMIT $5`,
+		[plan.parserProfile, plan.parserProfileRevision, plan.chunkerProfile, plan.chunkerRevision, limit],
+	);
+	return r.rows.map((x) => ({
+		sourceId: x.source_id,
+		revision: Number(x.revision),
+		tenantId: x.tenant_id,
+		contentDigest: x.content_digest,
+		sizeBytes: Number(x.size_bytes),
+		mediaType: x.media_type,
+	}));
 }

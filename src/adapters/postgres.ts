@@ -56,8 +56,47 @@ export class Store {
 	}
 }
 
-export function newPool(url: string, maxConn: number): pg.Pool {
-	return new Pool({ connectionString: url, max: maxConn, allowExitOnIdle: false });
+/**
+ * P2.7: the bounds of every connection (database.connect_timeout,
+ * statement_timeout, idle_timeout): a paused or unreachable server ends a
+ * connect, a statement or an abandoned transaction at its bound instead of
+ * holding a request or a client forever.
+ */
+export interface PoolBounds {
+	connectTimeoutMs: number;
+	statementTimeoutMs: number;
+	idleTimeoutMs: number;
+	idleInTransactionTimeoutMs: number;
+}
+
+export const defaultPoolBounds: PoolBounds = {
+	connectTimeoutMs: 10_000,
+	statementTimeoutMs: 30_000,
+	idleTimeoutMs: 30_000,
+	idleInTransactionTimeoutMs: 60_000,
+};
+
+export function newPool(
+	url: string,
+	maxConn: number,
+	bounds: PoolBounds = defaultPoolBounds,
+	onError: (err: Error) => void = () => undefined,
+): pg.Pool {
+	const pool = new Pool({
+		connectionString: url,
+		max: maxConn,
+		allowExitOnIdle: false,
+		connectionTimeoutMillis: bounds.connectTimeoutMs,
+		idleTimeoutMillis: bounds.idleTimeoutMs,
+		statement_timeout: bounds.statementTimeoutMs,
+		// The client-side bound a little past the server's, for a server that never answers.
+		query_timeout: bounds.statementTimeoutMs + 5_000,
+		idle_in_transaction_session_timeout: bounds.idleInTransactionTimeoutMs,
+	});
+	// An idle client's error (the server restarted, paused or dropped it) is
+	// reported; unhandled it would be an uncaught exception ending the process.
+	pool.on("error", onError);
+	return pool;
 }
 
 // ---------------------------------------------------------------------------

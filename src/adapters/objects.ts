@@ -7,6 +7,7 @@
 // exactly one GET and one PUT, signed for the endpoint the Pod reaches. No
 // key or URL is logged.
 import {
+	DeleteObjectCommand,
 	GetObjectCommand,
 	type GetObjectCommandOutput,
 	HeadObjectCommand,
@@ -19,6 +20,8 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 export interface ObjectsConfig {
+	/** P2.7: the bound of one object-store operation (objects.request_timeout); 0 is the default 30s. */
+	requestTimeoutMs?: number;
 	endpoint: string;
 	/** The endpoint parser Pods reach; presigned URLs are signed for it. */
 	stageEndpoint: string;
@@ -38,21 +41,46 @@ export interface ObjectStore {
 	putIfAbsent(key: string, bytes: Buffer, contentType: string): Promise<void>;
 	presignGet(key: string, ttlSeconds: number): Promise<string>;
 	presignPut(key: string, ttlSeconds: number): Promise<string>;
+	/**
+	 * P2.6: a presigned PUT whose signed headers bind the exact length, the
+	 * media type and the SHA-256 the store verifies on receipt; the caller
+	 * sends exactly the returned headers.
+	 */
+	presignUpload(key: string, ttlSeconds: number, binding: UploadBinding): Promise<PresignedUpload>;
+	/** P2.7: removes an object (the erasure of a deleted source); a missing one is already gone. */
+	delete(key: string): Promise<void>;
 	close(): void;
+}
+
+export interface UploadBinding {
+	sizeBytes: number;
+	mediaType: string;
+	/** The SHA-256 of the declared bytes, base64 (x-amz-checksum-sha256). */
+	sha256Base64: string;
+}
+
+export interface PresignedUpload {
+	url: string;
+	headers: Record<string, string>;
 }
 
 export class S3Objects implements ObjectStore {
 	private readonly client: S3Client;
 	private readonly signer: S3Client;
+	private readonly timeoutMs: number;
 
 	constructor(private readonly cfg: ObjectsConfig) {
 		const credentials = { accessKeyId: cfg.accessKeyId, secretAccessKey: cfg.secretAccessKey };
+		this.timeoutMs = cfg.requestTimeoutMs || 30_000;
 		this.client = new S3Client({
 			endpoint: cfg.endpoint,
 			region: cfg.region,
 			forcePathStyle: true,
 			credentials,
 			maxAttempts: 1,
+			// P2.7: a hung store ends at the bound (connect and socket), and
+			// every operation carries its own abort at the same bound.
+			requestHandler: { connectionTimeout: Math.min(this.timeoutMs, 10_000), requestTimeout: this.timeoutMs },
 		});
 		this.signer = new S3Client({
 			endpoint: cfg.stageEndpoint || cfg.endpoint,
@@ -64,7 +92,7 @@ export class S3Objects implements ObjectStore {
 
 	async size(key: string): Promise<number | undefined> {
 		try {
-			const h = await this.client.send(new HeadObjectCommand({ Bucket: this.cfg.bucket, Key: key }));
+			const h = await this.client.send(new HeadObjectCommand({ Bucket: this.cfg.bucket, Key: key }), this.bounded());
 			return h.ContentLength ?? 0;
 		} catch (err) {
 			if (err instanceof NotFound || err instanceof NoSuchKey || status(err) === 404) return undefined;
@@ -75,7 +103,7 @@ export class S3Objects implements ObjectStore {
 	async read(key: string, maxBytes: number): Promise<Buffer> {
 		let out: GetObjectCommandOutput;
 		try {
-			out = await this.client.send(new GetObjectCommand({ Bucket: this.cfg.bucket, Key: key }));
+			out = await this.client.send(new GetObjectCommand({ Bucket: this.cfg.bucket, Key: key }), this.bounded());
 		} catch (err) {
 			if (err instanceof NoSuchKey || status(err) === 404) throw new ObjectMissing("object missing");
 			throw err;
@@ -109,6 +137,7 @@ export class S3Objects implements ObjectStore {
 					ContentType: contentType,
 					IfNoneMatch: "*",
 				}),
+				this.bounded(),
 			);
 		} catch (err) {
 			// A content-addressed key that exists already holds these bytes.
@@ -118,6 +147,10 @@ export class S3Objects implements ObjectStore {
 			if (status(err) === 412 || (await this.size(key)) !== undefined) return;
 			throw err;
 		}
+	}
+
+	private bounded(): { abortSignal: AbortSignal } {
+		return { abortSignal: AbortSignal.timeout(this.timeoutMs) };
 	}
 
 	presignGet(key: string, ttlSeconds: number): Promise<string> {
@@ -130,6 +163,36 @@ export class S3Objects implements ObjectStore {
 		return getSignedUrl(this.signer, new PutObjectCommand({ Bucket: this.cfg.bucket, Key: key }), {
 			expiresIn: ttlSeconds,
 		});
+	}
+
+	async presignUpload(key: string, ttlSeconds: number, b: UploadBinding): Promise<PresignedUpload> {
+		const headers = {
+			"content-length": String(b.sizeBytes),
+			"content-type": b.mediaType,
+			"x-amz-checksum-sha256": b.sha256Base64,
+		};
+		const url = await getSignedUrl(
+			this.signer,
+			new PutObjectCommand({
+				Bucket: this.cfg.bucket,
+				Key: key,
+				ContentLength: b.sizeBytes,
+				ContentType: b.mediaType,
+				ChecksumSHA256: b.sha256Base64,
+			}),
+			{
+				expiresIn: ttlSeconds,
+				// Signed, and kept as headers (never hoisted into the query), so
+				// a PUT of other bytes, another length or type is refused.
+				signableHeaders: new Set(Object.keys(headers)),
+				unhoistableHeaders: new Set(["x-amz-checksum-sha256", "content-type"]),
+			},
+		);
+		return { url, headers };
+	}
+
+	async delete(key: string): Promise<void> {
+		await this.client.send(new DeleteObjectCommand({ Bucket: this.cfg.bucket, Key: key }), this.bounded());
 	}
 
 	close(): void {
@@ -162,6 +225,22 @@ export class MemoryObjects implements ObjectStore {
 	}
 	async presignPut(key: string): Promise<string> {
 		return `memory://put/${key}`;
+	}
+	/** The presigned uploads handed out, by key (tests perform the PUT themselves). */
+	readonly uploads = new Map<string, UploadBinding & { ttlSeconds: number }>();
+	async presignUpload(key: string, ttlSeconds: number, b: UploadBinding): Promise<PresignedUpload> {
+		this.uploads.set(key, { ...b, ttlSeconds });
+		return {
+			url: `memory://upload/${key}`,
+			headers: {
+				"content-length": String(b.sizeBytes),
+				"content-type": b.mediaType,
+				"x-amz-checksum-sha256": b.sha256Base64,
+			},
+		};
+	}
+	async delete(key: string): Promise<void> {
+		this.objects.delete(key);
 	}
 	close(): void {}
 }

@@ -4,6 +4,7 @@
 // current ACL revision, so a listing never counts or pages over rows the
 // scope cannot read.
 import type pg from "pg";
+import type { SourceRemovalRecord } from "../domain/removal.js";
 import type { AccessEntry, IngestState, PrincipalType, Source, SourceKind } from "../domain/source.js";
 import type { PoolClient } from "./postgres.js";
 
@@ -25,9 +26,10 @@ interface SourceRow {
 	size_bytes: string;
 	object_key: string;
 	ingest: string | null;
+	owner_id: string | null;
 }
 
-const sourceSelect = `SELECT s.source_id, s.tenant_id, s.project_id, s.kind, s.locator, s.current_revision::text AS current_revision,
+const sourceSelect = `SELECT s.source_id, s.tenant_id, s.project_id, s.kind, s.locator, s.current_revision::text AS current_revision, s.owner_id,
 	s.acl_revision::text AS acl_revision, s.deleted, s.created_at, s.updated_at, r.content_digest, r.media_type,
 	r.size_bytes::text AS size_bytes, r.object_key,
 	(SELECT i.state FROM ingest_requests i WHERE i.source_id = s.source_id AND i.source_revision = s.current_revision
@@ -35,11 +37,15 @@ const sourceSelect = `SELECT s.source_id, s.tenant_id, s.project_id, s.kind, s.l
 	FROM sources s JOIN source_revisions r ON r.source_id = s.source_id AND r.revision = s.current_revision`;
 
 async function aclOf(c: Queryable, sourceId: string, aclRevision: number): Promise<AccessEntry[]> {
-	const r = await c.query<{ principal_type: string; principal_id: string }>(
-		"SELECT principal_type, principal_id FROM source_acl WHERE source_id = $1 AND acl_revision = $2 ORDER BY principal_type, principal_id",
+	const r = await c.query<{ principal_type: string; principal_id: string; permission: string }>(
+		"SELECT principal_type, principal_id, permission FROM source_acl WHERE source_id = $1 AND acl_revision = $2 ORDER BY principal_type, principal_id",
 		[sourceId, aclRevision],
 	);
-	return r.rows.map((x) => ({ principalType: x.principal_type as PrincipalType, principalId: x.principal_id }));
+	return r.rows.map((x) => ({
+		principalType: x.principal_type as PrincipalType,
+		principalId: x.principal_id,
+		...(x.permission === "manage" ? { permission: "manage" as const } : {}),
+	}));
 }
 
 async function fromRow(c: Queryable, r: SourceRow): Promise<Source> {
@@ -57,6 +63,7 @@ async function fromRow(c: Queryable, r: SourceRow): Promise<Source> {
 		objectKey: r.object_key,
 		aclRevision,
 		access: await aclOf(c, r.source_id, aclRevision),
+		...(r.owner_id ? { ownerId: r.owner_id } : {}),
 		ingest: (r.ingest ?? "pending") as IngestState,
 		deleted: r.deleted,
 		createdAt: r.created_at,
@@ -148,12 +155,14 @@ export async function insertSource(
 		mediaType: string;
 		sizeBytes: number;
 		objectKey: string;
+		/** P2.7: the registering actor. */
+		ownerId?: string;
 	},
 ): Promise<void> {
 	await c.query(
-		`INSERT INTO sources (source_id, tenant_id, project_id, kind, locator, current_revision, acl_revision, command_id, request_digest)
-		 VALUES ($1, $2, $3, $4, $5, 1, 1, $6, $7)`,
-		[s.sourceId, s.tenantId, s.projectId, s.kind, s.locator, s.commandId, s.requestDigest],
+		`INSERT INTO sources (source_id, tenant_id, project_id, kind, locator, current_revision, acl_revision, command_id, request_digest, owner_id)
+		 VALUES ($1, $2, $3, $4, $5, 1, 1, $6, $7, $8)`,
+		[s.sourceId, s.tenantId, s.projectId, s.kind, s.locator, s.commandId, s.requestDigest, s.ownerId ?? null],
 	);
 	await c.query(
 		"INSERT INTO source_revisions (source_id, revision, content_digest, media_type, size_bytes, object_key) VALUES ($1, 1, $2, $3, $4, $5)",
@@ -176,8 +185,8 @@ export async function insertAcl(
 	);
 	for (const e of entries)
 		await c.query(
-			"INSERT INTO source_acl (source_id, acl_revision, principal_type, principal_id) VALUES ($1, $2, $3, $4)",
-			[sourceId, aclRevision, e.principalType, e.principalId],
+			"INSERT INTO source_acl (source_id, acl_revision, principal_type, principal_id, permission) VALUES ($1, $2, $3, $4, $5)",
+			[sourceId, aclRevision, e.principalType, e.principalId, e.permission ?? "read"],
 		);
 }
 
@@ -548,4 +557,230 @@ export async function revisionObject(
 		[sourceId, revision, contentDigest],
 	);
 	return r.rows[0]?.object_key;
+}
+
+// P2.6: the single-use upload capabilities (migration 00008).
+
+export interface UploadRecord {
+	uploadId: string;
+	tenantId: string;
+	actorId: string;
+	commandId: string;
+	requestDigest: string;
+	contentDigest: string;
+	sizeBytes: number;
+	mediaType: string;
+	objectKey: string;
+	expiresAt: Date;
+	consumedAt: Date | null;
+	sourceId: string | null;
+}
+
+interface UploadRow {
+	upload_id: string;
+	tenant_id: string;
+	actor_id: string;
+	command_id: string;
+	request_digest: string;
+	content_digest: string;
+	size_bytes: string;
+	media_type: string;
+	object_key: string;
+	expires_at: Date;
+	consumed_at: Date | null;
+	source_id: string | null;
+}
+
+function uploadOf(r: UploadRow): UploadRecord {
+	return {
+		uploadId: r.upload_id,
+		tenantId: r.tenant_id,
+		actorId: r.actor_id,
+		commandId: r.command_id,
+		requestDigest: r.request_digest,
+		contentDigest: r.content_digest,
+		sizeBytes: Number(r.size_bytes),
+		mediaType: r.media_type,
+		objectKey: r.object_key,
+		expiresAt: r.expires_at,
+		consumedAt: r.consumed_at,
+		sourceId: r.source_id,
+	};
+}
+
+/** An upload of the tenant by id (another tenant's is indistinguishable from none). */
+export async function getUpload(c: Queryable, tenantId: string, uploadId: string): Promise<UploadRecord | undefined> {
+	const r = await c.query<UploadRow>("SELECT * FROM source_uploads WHERE tenant_id = $1 AND upload_id = $2", [
+		tenantId,
+		uploadId,
+	]);
+	return r.rows[0] ? uploadOf(r.rows[0]) : undefined;
+}
+
+/** Records an upload; an existing row of the same command is answered as it is (inserted false). */
+export async function insertUpload(
+	c: Queryable,
+	u: Omit<UploadRecord, "consumedAt" | "sourceId">,
+): Promise<{ record: UploadRecord; inserted: boolean }> {
+	const ins = await c.query(
+		`INSERT INTO source_uploads (upload_id, tenant_id, actor_id, command_id, request_digest, content_digest, size_bytes, media_type, object_key, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (tenant_id, command_id) DO NOTHING RETURNING upload_id`,
+		[
+			u.uploadId,
+			u.tenantId,
+			u.actorId,
+			u.commandId,
+			u.requestDigest,
+			u.contentDigest,
+			u.sizeBytes,
+			u.mediaType,
+			u.objectKey,
+			u.expiresAt,
+		],
+	);
+	const r = await c.query<UploadRow>("SELECT * FROM source_uploads WHERE tenant_id = $1 AND command_id = $2", [
+		u.tenantId,
+		u.commandId,
+	]);
+	return { record: uploadOf(r.rows[0] as UploadRow), inserted: (ins.rowCount ?? 0) === 1 };
+}
+
+/** Consumes an unconsumed upload for its source; false when it was consumed meanwhile. */
+export async function consumeUpload(
+	c: PoolClient,
+	tenantId: string,
+	uploadId: string,
+	sourceId: string,
+	at: Date,
+): Promise<boolean> {
+	const r = await c.query(
+		"UPDATE source_uploads SET consumed_at = $4, source_id = $3 WHERE tenant_id = $1 AND upload_id = $2 AND consumed_at IS NULL",
+		[tenantId, uploadId, sourceId, at],
+	);
+	return (r.rowCount ?? 0) === 1;
+}
+
+// P2.7: source deletions and ACL revocations in the removal inventory (00012).
+
+export interface SourceRemovalRow {
+	record: SourceRemovalRecord;
+	inventoryKey: string | null;
+	state: "pending" | "recorded" | "restored";
+}
+
+interface SourceRemovalDbRow {
+	tenant_id: string;
+	command_id: string;
+	source_id: string;
+	decision: "delete" | "revoke";
+	decider: string;
+	request_digest: string;
+	acl_revision: string;
+	access: string[];
+	recorded_at: Date;
+	inventory_key: string | null;
+	state: "pending" | "recorded" | "restored";
+}
+
+function sourceRemovalOf(r: SourceRemovalDbRow): SourceRemovalRow {
+	return {
+		record: {
+			schemaVersion: 1,
+			kind: "source-removal",
+			tenantId: r.tenant_id,
+			commandId: r.command_id,
+			requestDigest: r.request_digest,
+			sourceId: r.source_id,
+			decision: r.decision,
+			decider: r.decider,
+			aclRevision: Number(r.acl_revision),
+			access: r.access,
+			recordedAt: r.recorded_at.toISOString(),
+		},
+		inventoryKey: r.inventory_key,
+		state: r.state,
+	};
+}
+
+const sourceRemovalColumns =
+	"tenant_id, command_id, source_id, decision, decider, request_digest, acl_revision::text AS acl_revision, access, recorded_at, inventory_key, state";
+
+export async function insertSourceRemoval(
+	c: PoolClient,
+	r: SourceRemovalRecord,
+	key: string,
+	state: "pending" | "restored" = "pending",
+): Promise<void> {
+	await c.query(
+		`INSERT INTO source_removals (tenant_id, command_id, source_id, decision, decider, request_digest, acl_revision, access, recorded_at, inventory_key, state)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)`,
+		[
+			r.tenantId,
+			r.commandId,
+			r.sourceId,
+			r.decision,
+			r.decider,
+			r.requestDigest,
+			r.aclRevision,
+			JSON.stringify(r.access),
+			r.recordedAt,
+			key,
+			state,
+		],
+	);
+}
+
+export async function sourceRemovalByCommand(
+	c: Queryable,
+	tenantId: string,
+	commandId: string,
+): Promise<SourceRemovalRow | undefined> {
+	const r = await c.query<SourceRemovalDbRow>(
+		`SELECT ${sourceRemovalColumns} FROM source_removals WHERE tenant_id = $1 AND command_id = $2`,
+		[tenantId, commandId],
+	);
+	return r.rows[0] ? sourceRemovalOf(r.rows[0]) : undefined;
+}
+
+export async function markSourceRemovalRecorded(c: Queryable, tenantId: string, commandId: string): Promise<void> {
+	await c.query(
+		`UPDATE source_removals SET state = 'recorded', updated_at = now()
+		 WHERE tenant_id = $1 AND command_id = $2 AND state = 'pending' AND inventory_key IS NOT NULL`,
+		[tenantId, commandId],
+	);
+}
+
+export async function pendingSourceRemovals(
+	c: Queryable,
+	olderThanMs: number,
+	limit: number,
+): Promise<SourceRemovalRow[]> {
+	const r = await c.query<SourceRemovalDbRow>(
+		`SELECT ${sourceRemovalColumns} FROM source_removals
+		 WHERE state = 'pending' AND updated_at <= now() - make_interval(secs => $1::float8 / 1000)
+		 ORDER BY updated_at, tenant_id, command_id LIMIT $2`,
+		[olderThanMs, limit],
+	);
+	return r.rows.map(sourceRemovalOf);
+}
+
+/**
+ * The access list a record keeps: "type:id", prefixed "manage:" for a manage
+ * entry (unambiguous: "manage" is no principal type, while ids may hold ":"), sorted.
+ */
+export function accessTextOf(entries: AccessEntry[]): string[] {
+	return entries.map((e) => `${e.permission === "manage" ? "manage:" : ""}${e.principalType}:${e.principalId}`).sort();
+}
+
+export function accessOfText(text: string[]): AccessEntry[] {
+	return text.map((t) => {
+		const manage = t.startsWith("manage:");
+		const body = manage ? t.slice("manage:".length) : t;
+		const i = body.indexOf(":");
+		return {
+			principalType: body.slice(0, i) as PrincipalType,
+			principalId: body.slice(i + 1),
+			...(manage ? { permission: "manage" as const } : {}),
+		};
+	});
 }

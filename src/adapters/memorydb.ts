@@ -638,7 +638,10 @@ export async function pendingRemovals(c: Queryable, olderThanMs: number, limit: 
 
 /** The newest removal the database knows: where a restore's lost window can begin. */
 export async function removalWatermark(c: Queryable): Promise<Date | undefined> {
-	const r = await c.query<{ t: Date | null }>("SELECT max(recorded_at) AS t FROM memory_removals");
+	// P2.7: memory and source removals share one inventory and one watermark.
+	const r = await c.query<{ t: Date | null }>(
+		"SELECT max(t) AS t FROM (SELECT max(recorded_at) AS t FROM memory_removals UNION ALL SELECT max(recorded_at) FROM source_removals) x",
+	);
 	return r.rows[0]?.t ?? undefined;
 }
 
@@ -646,7 +649,8 @@ export async function removalWatermark(c: Queryable): Promise<Date | undefined> 
 export async function knownRemovalKeys(c: Queryable, keys: string[]): Promise<Set<string>> {
 	if (keys.length === 0) return new Set();
 	const r = await c.query<{ inventory_key: string }>(
-		"SELECT inventory_key FROM memory_removals WHERE inventory_key = ANY($1::text[])",
+		`SELECT inventory_key FROM memory_removals WHERE inventory_key = ANY($1::text[])
+		 UNION ALL SELECT inventory_key FROM source_removals WHERE inventory_key = ANY($1::text[])`,
 		[keys],
 	);
 	return new Set(r.rows.map((x) => x.inventory_key));
