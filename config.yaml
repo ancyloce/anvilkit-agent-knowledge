@@ -84,6 +84,9 @@ objects:
   region: us-east-1
 sources:
   max_bytes: 33554432
+  # P2.6: how long a BeginUpload capability may be used (the presigned PUT
+  # and the registration that consumes it); [1m, 1h].
+  upload_ttl: 15m
 parser:
   profile: ""
   namespace: anvilkit-parsing
@@ -124,7 +127,19 @@ qdrant:
 index:
   sparse_profile: bge-m3-lexical-v1
   batch_size: 16
-  max_result_bytes: 16777216
+  # P2.7: at least the parser profile's maxOutputBytes (33554432 for
+  # parser-docling-v1/-dev-v1); a smaller bound is refused at start, since an
+  # accepted parse larger than it could never be indexed.
+  max_result_bytes: 33554432
+  # P2.7: a failed entry of a still-eligible revision is attempted again
+  # after retry_delay, at most max_attempts times, then quarantined.
+  max_attempts: 3
+  retry_delay: 5m
+  # P2.7: the accepted generation's document points are counted against its
+  # ledger this often; missing points (a deleted collection) are a metric and
+  # an error (search answers UNAVAILABLE), repaired by
+  # `knowledgectl rebuild documents`.
+  count_check_interval: 10m
   poll_interval: 200ms
   qualify_interval: 2s
 retrieval:
@@ -152,6 +167,19 @@ retrieval:
 # retrieval profile above; max_allowed_facts bounds the allowed-fact set of
 # one recall (a larger set is refused, never truncated). DEVELOPMENT_ONLY
 # bounds.
+# P2.7: the cleanup identity's work (its URL is ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL
+# or _FILE, environment only): the erasure of deleted sources (upload,
+# unshared content-addressed copy, parse results, chunk rows, after the
+# indexer removed their points) and the retention of delivery rows, on the
+# one replica that holds the reconciler lock. Retention must exceed the
+# stream's redelivery horizon for the inbox.
+cleanup:
+  interval: 10m
+  batch: 1000
+  outbox_retention: 168h
+  inbox_retention: 720h
+  attempts_retention: 720h
+  launches_retention: 720h
 store:
   schema: memory_store
   max_conn: 4
