@@ -5,7 +5,11 @@ import { GenericContainer, type StartedTestContainer, Wait } from "testcontainer
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ObjectMissing, ObjectTooLarge, S3Objects } from "../src/adapters/objects.js";
 
+// The foundation's MinIO by its digest; ANVILKIT_TEST_MINIO_IMAGE names a
+// mirror of the same digest where the upstream registries no longer serve
+// it (P3.1; GitHub-hosted runners since 2026-10).
 const minioImage =
+	process.env.ANVILKIT_TEST_MINIO_IMAGE ||
 	"minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e";
 
 let container: StartedTestContainer;

@@ -21,4 +21,20 @@ describe("telemetry", () => {
 		expect(spans[0]?.spanContext().traceId).toBe("0af7651916cd43dd8448eb211c80319c");
 		await t.shutdown();
 	});
+
+	it("puts the API's request identifier on the server span of the caller's trace (P3.6)", async () => {
+		const exporter = new InMemorySpanExporter();
+		const t = new Telemetry({ otlpEndpoint: "", sampleRatio: 1 }, "test", new SimpleSpanProcessor({ exporter }));
+		const end = t.rpc(
+			"anvilkit.knowledge.v1.SearchRequest",
+			"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+			"req_abc123",
+		);
+		end(0);
+		await new Promise((resolve) => setImmediate(resolve));
+		const span = exporter.getFinishedSpans()[0];
+		expect(span?.attributes["anvilkit.request_id"]).toBe("req_abc123");
+		expect(span?.spanContext().traceId).toBe("0af7651916cd43dd8448eb211c80319c");
+		await t.shutdown();
+	});
 });
