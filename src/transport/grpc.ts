@@ -111,6 +111,7 @@ import { type Snapshot as DomainSnapshot, RetrievalError } from "../domain/retri
 import * as domain from "../domain/source.js";
 import { type Task, TaskError } from "../domain/task.js";
 import type { RpcObserver } from "../telemetry.js";
+import { requestIdMetadata } from "../telemetry.js";
 import {
 	createAuthorizer,
 	type IdentityWatcher,
@@ -514,7 +515,11 @@ export function createGrpcServer(
 		fn: (r: Req) => Promise<Res>,
 	): ((call: ServerUnaryCall<Req, Res>, cb: sendUnaryData<Res>) => void) => {
 		return (call, sendReply) => {
-			const end = observer?.rpc(typeName, call.metadata.get("traceparent")[0]?.toString());
+			const end = observer?.rpc(
+				typeName,
+				call.metadata.get("traceparent")[0]?.toString(),
+				call.metadata.get(requestIdMetadata)[0]?.toString(),
+			);
 			const cb: sendUnaryData<Res> = (err, value) => {
 				end?.(err ? ((err as { code?: number }).code ?? status.UNKNOWN) : status.OK);
 				sendReply(err, value);
