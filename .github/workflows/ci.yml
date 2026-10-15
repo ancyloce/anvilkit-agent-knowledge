@@ -13,18 +13,31 @@ on:
     tags: ["v*"]
   pull_request:
 env:
+  # A mirror of the pinned MinIO digest for the S3 tests (P3.1): the
+  # upstream registries no longer serve it to GitHub-hosted runners. Set
+  # the repository variable ANVILKIT_TEST_MINIO_IMAGE to the mirror; unset,
+  # the tests pull the upstream reference.
+  ANVILKIT_TEST_MINIO_IMAGE: ${{ vars.ANVILKIT_TEST_MINIO_IMAGE }}
+  # anvilkit-services commit whose jobs/migration/internal/migrate/sql holds
+  # the migrations this repository's tests apply (MIG-02: pinned, never the
+  # parent's moving default branch; bump it with every migration the
+  # service starts to depend on).
+  PARENT_REF: a8d293682bce1fc8d0a20cc475c7f4b3ddad3e0a
   ANVILKIT_KNOWLEDGE_MIGRATIONS_DIR: ${{ github.workspace }}/parent/jobs/migration/internal/migrate/sql/knowledge
+permissions:
+  contents: read
 jobs:
   service:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ancyloce/anvilkit-services
+          ref: ${{ env.PARENT_REF }}
           path: parent
           sparse-checkout: jobs/migration/internal/migrate/sql/knowledge
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24.19.0"
       - run: npm install -g pnpm@12.3.4
@@ -33,28 +46,28 @@ jobs:
       - run: pnpm run lint
       - run: pnpm run build
       - run: pnpm test
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.27.0"
       - run: cd forwarder && GOWORK=off GOFLAGS=-mod=readonly go build ./... && go vet ./... && go test -count=1 ./...
   image:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: docker build -t anvilkit-agent-knowledge:ci .
       - run: docker build --target forwarder -t anvilkit-knowledge-forwarder:ci .
   chart:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: "v3.19.0"
       - run: >-
           helm lint deploy/chart --set database.secret.name=knowledge-database --set nats.url=tls://nats:4222 --set nats.tls.caSecret.name=nats-ca --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer
           --set forwarder.database.secret.name=knowledge-forwarder-database
-          --set relay.database.secret.name=knowledge-relay-database --set relay.queue.secret.name=queue-valkey
+          --set relay.database.secret.name=knowledge-relay-database --set relay.queue.secret.name=queue-valkey --set nats.credentials.secret.name=knowledge-nats
       - run: >-
           helm template anvilkit-agent-knowledge deploy/chart --set database.secret.name=knowledge-database --set nats.url=tls://nats:4222 --set nats.tls.caSecret.name=nats-ca --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer
           --set forwarder.database.secret.name=knowledge-forwarder-database
-          --set relay.database.secret.name=knowledge-relay-database --set relay.queue.secret.name=queue-valkey > /dev/null
+          --set relay.database.secret.name=knowledge-relay-database --set relay.queue.secret.name=queue-valkey --set nats.credentials.secret.name=knowledge-nats > /dev/null
