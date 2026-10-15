@@ -655,3 +655,25 @@ export async function knownRemovalKeys(c: Queryable, keys: string[]): Promise<Se
 	);
 	return new Set(r.rows.map((x) => x.inventory_key));
 }
+
+/**
+ * P3.6: the memory projections not yet accepted (pending, running,
+ * materialized), the age of the oldest of them since it last changed (the
+ * projection lag) and the failed ones, for the operator's gauges.
+ */
+export async function projectionBacklog(
+	c: Queryable,
+): Promise<{ unfinished: number; oldestSeconds: number; failed: number }> {
+	const r = await c.query<{ unfinished: string; oldest: number; failed: string }>(
+		`SELECT count(*) FILTER (WHERE state IN ('pending', 'running', 'materialized'))::text AS unfinished,
+		        coalesce(extract(epoch FROM now() - min(updated_at) FILTER (WHERE state IN ('pending', 'running', 'materialized'))), 0)::float8 AS oldest,
+		        count(*) FILTER (WHERE state = 'failed')::text AS failed
+		   FROM memory_projections`,
+	);
+	const row = r.rows[0];
+	return {
+		unfinished: Number(row?.unfinished ?? 0),
+		oldestSeconds: Number(row?.oldest ?? 0),
+		failed: Number(row?.failed ?? 0),
+	};
+}

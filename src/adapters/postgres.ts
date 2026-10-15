@@ -20,6 +20,24 @@ export const metadataKeys = {
 	schemaVersion: "anvilkit_schema_version",
 } as const;
 
+/**
+ * P3.1 (MIG-02): the lowest anvilkit_knowledge migration version this
+ * build's statements need (00012_source_removals). The migrations are
+ * applied by the parent's migration Job, not embedded here, so the minimum
+ * is declared and raised with every migration a statement starts to depend
+ * on. A schema ahead of it is accepted: the next release's expand
+ * migration may be applied while this image still serves.
+ */
+export const minimumSchemaVersion = 12;
+
+/** The applied version of the domain's own migrations (goose_db_version). */
+export async function schemaVersion(pool: pg.Pool): Promise<number> {
+	const r = await pool.query<{ v: string }>(
+		"SELECT coalesce(max(version_id), 0)::text AS v FROM goose_db_version WHERE is_applied",
+	);
+	return Number(r.rows[0]?.v ?? 0);
+}
+
 export class Store {
 	private current: pg.Pool;
 
