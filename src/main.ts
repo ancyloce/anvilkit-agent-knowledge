@@ -9,7 +9,7 @@ import { type ChannelCredentials, type ChannelOptions, credentials } from "@grpc
 import { collectDefaultMetrics, Registry } from "prom-client";
 import { ControlDisclosure, ControlDispatchQuery } from "./adapters/control.js";
 import type { ParserProfile } from "./adapters/jobcontract.js";
-import { Store } from "./adapters/postgres.js";
+import { minimumSchemaVersion, Store, schemaVersion } from "./adapters/postgres.js";
 import { Cleanup, reconcilerLock, withLock } from "./application/cleanup.js";
 import { Indexer } from "./application/indexer.js";
 import { Ingest, planOf } from "./application/ingest.js";
@@ -28,7 +28,7 @@ import { jsonLogger, type Logger } from "./log.js";
 import { Metrics } from "./metrics.js";
 import { Telemetry } from "./telemetry.js";
 import { createGrpcServer } from "./transport/grpc.js";
-import { createHealthServer, DependencyProbe, listen } from "./transport/health.js";
+import { createHealthServer, DependencyProbe, listen, SchemaGate } from "./transport/health.js";
 import { clientCredentials, clientOptions } from "./transport/identity.js";
 import { policy } from "./transport/policy.js";
 
@@ -172,7 +172,14 @@ export async function start(
 		3_000,
 	);
 	database.start();
-	const health = createHealthServer(registry, () => ready && tasks.ready() && database.healthy());
+	// P3.1 (MIG-02): readiness also needs the schema at or above this build's minimum.
+	const schema = new SchemaGate(() => schemaVersion(store.pool), minimumSchemaVersion, 5_000, log);
+	schema.start();
+	const health = createHealthServer(
+		registry,
+		() => ready && tasks.ready() && database.healthy() && schema.satisfied(),
+		() => schema.why(),
+	);
 	const snapshots = new Snapshots(store, log);
 	// P2.7: erasure of deleted sources and delivery retention (cleanup identity).
 	const cleanup = new Cleanup(
@@ -379,6 +386,8 @@ export async function start(
 				),
 			);
 		}, cfg.reload.intervalMs);
+		// The first schema check answers before readiness is offered (P3.1).
+		await schema.run();
 		grpc.serve();
 		ready = true;
 	} catch (err) {
@@ -388,6 +397,7 @@ export async function start(
 		if (watcher) clearInterval(watcher);
 		await grpc.stop(0).catch(() => undefined);
 		database.stop();
+		schema.stop();
 		health.close();
 		await retire(rt, cfg.reload.drainLimitMs);
 		if (dispatch instanceof ControlDispatchQuery) dispatch.close();
@@ -420,6 +430,7 @@ export async function start(
 			if (watcher) clearInterval(watcher);
 			await Promise.all([sweeping, watching, reconciling]).catch(() => undefined);
 			database.stop();
+			schema.stop();
 			const forcedDrain = await gens.shutdown(cfg.reload.drainLimitMs);
 			if (dispatch instanceof ControlDispatchQuery) dispatch.close();
 			metrics.drainSeconds.set((Date.now() - begin) / 1000);

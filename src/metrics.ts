@@ -9,6 +9,9 @@ export class Metrics {
 	readonly leaseOverruns: Counter;
 	readonly overdueRetries: Gauge;
 	readonly outboxOldest: Gauge;
+	readonly projectionBacklog: Gauge;
+	readonly projectionLag: Gauge;
+	readonly projectionsFailed: Gauge;
 	readonly configGeneration: Gauge;
 	readonly configRejections: Counter;
 	readonly configRotations: Counter;
@@ -67,6 +70,21 @@ export class Metrics {
 		this.outboxOldest = new Gauge({
 			name: "anvilkit_knowledge_outbox_oldest_unforwarded_seconds",
 			help: "Age of the oldest outbox message the forwarder has not acknowledged.",
+			registers: r,
+		});
+		this.projectionBacklog = new Gauge({
+			name: "anvilkit_knowledge_memory_projection_backlog",
+			help: "Memory projections not yet accepted (pending, running, materialized).",
+			registers: r,
+		});
+		this.projectionLag = new Gauge({
+			name: "anvilkit_knowledge_memory_projection_lag_seconds",
+			help: "Age of the oldest memory projection not yet accepted, since it last changed; 0 when there is none.",
+			registers: r,
+		});
+		this.projectionsFailed = new Gauge({
+			name: "anvilkit_knowledge_memory_projections_failed",
+			help: "Memory projections in state failed (the reconciliation retries them).",
 			registers: r,
 		});
 		this.configGeneration = new Gauge({

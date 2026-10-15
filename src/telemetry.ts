@@ -19,8 +19,11 @@ import {
 
 /** Observes one RPC: returns the function that records its gRPC status code. */
 export interface RpcObserver {
-	rpc(requestType: string, traceparent: string | undefined): (code: number) => void;
+	rpc(requestType: string, traceparent: string | undefined, requestId?: string): (code: number) => void;
 }
+
+/** P3.6 (API-09): the API's request identifier, sent as gRPC metadata and set on the server span. */
+export const requestIdMetadata = "x-anvilkit-request-id";
 
 export class Telemetry implements RpcObserver {
 	private readonly tracer: Tracer;
@@ -47,7 +50,7 @@ export class Telemetry implements RpcObserver {
 		}
 	}
 
-	rpc(requestType: string, traceparent: string | undefined): (code: number) => void {
+	rpc(requestType: string, traceparent: string | undefined, requestId?: string): (code: number) => void {
 		// "anvilkit.knowledge.v1.ClaimTaskRequest" -> service package and method.
 		const method = requestType.replace(/Request$/, "");
 		const parent = this.propagator.extract(ROOT_CONTEXT, { traceparent }, defaultTextMapGetter);
@@ -56,6 +59,8 @@ export class Telemetry implements RpcObserver {
 			{ kind: SpanKind.SERVER, attributes: { "rpc.system": "grpc", "rpc.method": method } },
 			parent,
 		);
+		// The opaque req_ identifier of the public request this call serves.
+		if (requestId && requestId.length <= 64) span.setAttribute("anvilkit.request_id", requestId);
 		let ended = false;
 		return (code: number) => {
 			if (ended) return;

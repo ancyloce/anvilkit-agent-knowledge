@@ -4,6 +4,7 @@
 // network, queue or NATS I/O happens while a row is locked; the
 // original-dispatch query of an external-effect lease runs before the
 // transaction that consumes its answer.
+import * as mdb from "../adapters/memorydb.js";
 import * as db from "../adapters/postgres.js";
 import { requestedEvent } from "../domain/event.js";
 import {
@@ -357,6 +358,10 @@ export class Tasks {
 				this.metrics.requests.set({ state: s }, o.byState[s] ?? 0);
 			this.metrics.overdueRetries.set(o.overdueRetries);
 			this.metrics.outboxOldest.set(o.oldestUnforwardedSeconds);
+			const projections = await mdb.projectionBacklog(this.store.pool);
+			this.metrics.projectionBacklog.set(projections.unfinished);
+			this.metrics.projectionLag.set(projections.oldestSeconds);
+			this.metrics.projectionsFailed.set(projections.failed);
 			this.metrics.poolTotal.set(this.store.pool.totalCount);
 			this.metrics.poolIdle.set(this.store.pool.idleCount);
 		} catch (err) {
