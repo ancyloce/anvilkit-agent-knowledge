@@ -29,3 +29,11 @@ The Knowledge service of the AnvilKit Agent platform (architecture V4.0, [DD-07]
 ## Semantics the tests prove
 
 The request and its `background.requested` event commit or roll back together; a new input supersedes the previous generation (stale, with its `background.completed`); two racing claims produce one claimant; a worker identity claims a generation once; a superseded, expired or fenced claimant's heartbeat and result are refused; an identical repeated submission returns the existing acceptance; input-digest mismatches change nothing; profile mismatches and reported failures consume the attempt within the bound; a deleted source cancels instead of accepting; an expired external-effect lease is released only with Control's not-sent evidence. The Go sidecar reads a row the Node owner wrote and publishes it to JetStream with `Nats-Msg-Id` = eventId; the forwarder identity cannot read domain tables. Startup failure unwinds the listeners; secret rotation replaces the pool and drains the old one; a rejected candidate leaves the active generation.
+
+## Contracts
+
+The generated contract consumers are an explicit versioned dependency, never a sibling checkout or a replace directive; the pin is the generated line below (read from the manifest by the parent's `tools/docs-status.py`, checked by its `tools/check-docs.py`).
+
+<!-- generated:contracts -->
+Contracts: this build pins `@anvilkit/generated-clients` to contracts commit `1c3ef95` (`package.json`; tag `go/v0.1.10`).
+<!-- /generated:contracts -->
