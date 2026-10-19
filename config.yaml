@@ -110,6 +110,17 @@ inference:
   dimensions: 1024
   rerank_profile: bge-reranker-v2-m3-v1
   rerank_revision: 953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e
+  # P2.7: an embedding-model change sets the new profile above and places
+  # the Inference deployment that still loads the earlier model as
+  # ANVILKIT_KNOWLEDGE_INFERENCE_RETAINED_URL (same transport as inference.tls;
+  # server_name defaults to its URL host), with that model's complete space:
+  #   retained:
+  #     embedding_profile: bge-m3-v1
+  #     embedding_revision: 5617a9f61b028005a4858fdac845db406aefb181
+  #     dimensions: 1024
+  #     sparse_profile: bge-m3-lexical-v1
+  # The accepted generation keeps serving with it until the generation of the
+  # new profile is accepted; then the retained placement is removed.
 # P16: the vector projection and hybrid retrieval (DD-07 §3/§4). The Qdrant
 # placement and API key come from the environment only
 # (ANVILKIT_KNOWLEDGE_QDRANT_URL, and ANVILKIT_KNOWLEDGE_QDRANT_API_KEY or the
