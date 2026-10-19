@@ -16,3 +16,11 @@ allowBuilds:
   ssh2: false
 minimumReleaseAgeExclude:
   - '@types/node@24.13.5'
+# Security fixes that the exact pins forbid: @anvilkit/generated-clients pins
+# @grpc/grpc-js 1.14.4 (CVE-2026-101916, fixed in 1.14.5), and
+# @qdrant/js-client-rest 1.19.0 pins undici 7.29.0 (CVE-2026-19534,
+# CVE-2026-84961, fixed in 7.29.1). Each selector names the vulnerable version
+# only; drop it once the pins move past it.
+overrides:
+  '@grpc/grpc-js@1.14.4': 1.14.5
+  undici@7.29.0: 7.29.1
