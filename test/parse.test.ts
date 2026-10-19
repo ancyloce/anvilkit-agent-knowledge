@@ -73,9 +73,11 @@ describe("parser Job template", () => {
 	});
 
 	// The admission suite's fixtures (deploy/policies/tests/resources): the Job and
-	// its Pod exactly as this template renders them (JSON is YAML).
-	it.runIf(process.env.ANVILKIT_RENDER_POLICY_FIXTURES)("renders the policy fixtures", () => {
-		const dir = process.env.ANVILKIT_RENDER_POLICY_FIXTURES as string;
+	// its Pod exactly as this template renders them (JSON is YAML). Without
+	// ANVILKIT_RENDER_POLICY_FIXTURES it only checks that they render, as the
+	// Workflow's TestRenderPolicyFixtures does.
+	it("renders the policy fixtures", () => {
+		const dir = process.env.ANVILKIT_RENDER_POLICY_FIXTURES;
 		const podDoc = {
 			apiVersion: "v1",
 			kind: "Pod",
@@ -86,8 +88,13 @@ describe("parser Job template", () => {
 			},
 			spec: job.spec.template.spec,
 		};
-		writeFileSync(join(dir, "parser-docling-dev-v1-job.yaml"), `${JSON.stringify(job, null, 2)}\n`);
-		writeFileSync(join(dir, "parser-docling-dev-v1-pod.yaml"), `${JSON.stringify(podDoc, null, 2)}\n`);
+		const jobDoc = `${JSON.stringify(job, null, 2)}\n`;
+		const podText = `${JSON.stringify(podDoc, null, 2)}\n`;
+		expect(JSON.parse(jobDoc)).toEqual(job);
+		expect(JSON.parse(podText)).toEqual(podDoc);
+		if (!dir) return;
+		writeFileSync(join(dir, "parser-docling-dev-v1-job.yaml"), jobDoc);
+		writeFileSync(join(dir, "parser-docling-dev-v1-pod.yaml"), podText);
 	});
 });
 
