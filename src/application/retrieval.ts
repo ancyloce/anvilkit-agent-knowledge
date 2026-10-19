@@ -5,8 +5,11 @@
 // set is the snapshot's sources the caller can read now (the Source
 // Registry's rule in SQL, never a cache), bounded by the profile: an
 // oversized set is refused, never truncated. Embed: the query through the
-// reviewed profile of the generation's own vector space; another model's
-// space is refused. Search: one Query API call whose dense and sparse
+// reviewed profile of the generation's own vector space, through the
+// Inference placement of that space (P2.7: during an embedding-model change
+// the retained placement serves the accepted generation's model); a space
+// no placement computes, or an answer of another model, is refused before
+// Qdrant is asked. Search: one Query API call whose dense and sparse
 // prefetch branches both carry the allowed-source filter, with the same
 // filter outside as additional protection, fused by RRF and ordered with a
 // stable tie-break. Every returned point's payload must name an allowed
@@ -18,12 +21,18 @@
 // no text, score or count. No evidence is an allowed answer.
 import { createHash } from "node:crypto";
 import * as idx from "../adapters/indexdb.js";
-import { InferenceError, InferenceMismatch, type InferencePort } from "../adapters/inference.js";
+import {
+	embedderFor,
+	InferenceError,
+	InferenceMismatch,
+	type InferencePort,
+	type Placement,
+} from "../adapters/inference.js";
 import type { ObjectStore } from "../adapters/objects.js";
 import type * as db from "../adapters/postgres.js";
 import { type Filter, type HybridQuery, type VectorIndex, VectorUnavailable } from "../adapters/qdrant.js";
 import * as rdb from "../adapters/retrievaldb.js";
-import { type SpaceProfile, sameSpace, sourceKeyOf, vectorNames } from "../domain/index.js";
+import { type SpaceProfile, sourceKeyOf, vectorNames, vectorsFit } from "../domain/index.js";
 import {
 	assembleContext,
 	authorizationRevisionOf,
@@ -111,6 +120,16 @@ export class Retrieval {
 
 	private open: () => boolean = () => true;
 	private indexHealthy: () => boolean = () => true;
+	private retained: () => Placement | undefined = () => undefined;
+
+	/**
+	 * P2.7: the Inference placement of an earlier embedding space
+	 * (inference.retained): snapshots of the generation that is still
+	 * accepted are queried with that generation's own model.
+	 */
+	setRetained(p: () => Placement | undefined): void {
+		this.retained = p;
+	}
 
 	/** P2.7: the Index Builder's last count check of the accepted generation. */
 	setIndexHealth(healthy: () => boolean): void {
@@ -177,10 +196,11 @@ export class Retrieval {
 		await requireDisclosure(this.disclosure, scope, "knowledge-snapshot", snap.snapshotId);
 		const g = await idx.getGeneration(this.store.pool, snap.generation);
 		if (!g) throw new RetrievalError("NOT_FOUND", "snapshot");
-		if (!sameSpace(g, space))
+		const embedder = embedderFor(g, [{ space, inference }, this.retained()]);
+		if (!embedder)
 			throw new RetrievalError(
 				"PROFILE_UNQUALIFIED",
-				`generation ${g.generation} is another vector space than the reviewed embedding profile`,
+				`generation ${g.generation} is a vector space no reviewed Inference placement computes`,
 			);
 		const readable = await this.readable(
 			scope,
@@ -212,10 +232,16 @@ export class Retrieval {
 		inTime();
 		let q: Awaited<ReturnType<InferencePort["embed"]>>;
 		try {
-			q = await inference.embed(compute, "query", [req.query]);
+			q = await embedder.embed(compute, "query", [req.query]);
 		} catch (err) {
 			throw this.computeError(err);
 		}
+		// P2.7: a query vector of another model is never compared with this generation's points.
+		if (!vectorsFit(g, q))
+			throw new RetrievalError(
+				"PROFILE_UNQUALIFIED",
+				`the query embedding is not generation ${g.generation}'s model space`,
+			);
 		const dense = q.dense[0] as number[];
 		const sparse = q.sparse[0] as { indices: number[]; values: number[] };
 
@@ -305,7 +331,7 @@ export class Retrieval {
 		}
 		if (candidates.length === 0) return empty(authorizationOf(beforeRead.keys(), beforeRead), 1);
 
-		// Rerank with the fixed reranker.
+		// Rerank with the fixed reranker of the active placement (it scores text, not vectors).
 		inTime();
 		let scores: Map<string, number>;
 		try {

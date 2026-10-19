@@ -10,15 +10,24 @@
 // reads the fact again; if the fact changed meanwhile it writes the new
 // state and repeats. The last write to any target therefore always follows
 // the last committed decision. Recall never trusts a projection: it
-// discloses only authoritative content after its own recheck.
+// discloses only authoritative content after its own recheck. A vector
+// target is written with the Inference placement of its generation's own
+// space (P2.7: during an embedding-model change the retained placement
+// keeps the accepted generation's memory points current with its model).
 // No Store, Qdrant or Inference I/O runs while a row is locked.
 import * as idx from "../adapters/indexdb.js";
-import { InferenceError, InferenceMismatch, type InferencePort } from "../adapters/inference.js";
+import {
+	embedderFor,
+	InferenceError,
+	InferenceMismatch,
+	type InferencePort,
+	type Placement,
+} from "../adapters/inference.js";
 import * as mdb from "../adapters/memorydb.js";
 import { type MemoryStorePort, type StoredFact, StoreUnavailable } from "../adapters/memorystore.js";
 import * as db from "../adapters/postgres.js";
 import { type VectorIndex, VectorUnavailable } from "../adapters/qdrant.js";
-import { type IndexGeneration, type SpaceProfile, sameSpace } from "../domain/index.js";
+import { type IndexGeneration, type SpaceProfile, vectorsFit } from "../domain/index.js";
 import {
 	type Fact,
 	MemoryError,
@@ -67,6 +76,7 @@ const retryMs = 500;
 
 export class MemoryProjector implements ResultRecords {
 	private open: () => boolean = () => true;
+	private retained: () => Placement | undefined = () => undefined;
 
 	constructor(
 		private readonly store: db.Store,
@@ -103,6 +113,18 @@ export class MemoryProjector implements ResultRecords {
 	 */
 	setGate(open: () => boolean): void {
 		this.open = open;
+	}
+
+	/** P2.7: the Inference placement of an earlier embedding space (inference.retained), for the generation still accepted. */
+	setRetained(p: () => Placement | undefined): void {
+		this.retained = p;
+	}
+
+	/** The placement that computes exactly the generation's space: the active or the retained one. */
+	private embedderOf(g: IndexGeneration): InferencePort | undefined {
+		const space = this.space();
+		const inference = this.inference();
+		return embedderFor(g, [space && inference ? { space, inference } : undefined, this.retained()]);
 	}
 
 	async advance(taskId: string, generation: number, workerId: string, inputDigest: string): Promise<ProjectionAnswer> {
@@ -227,13 +249,12 @@ export class MemoryProjector implements ResultRecords {
 		const vectors = this.vectors();
 		if (!vectors) return { ok: false, retry: false, code: projectionFailure.vectorsUnavailable };
 		const g = await idx.getGeneration(this.store.pool, target);
-		const space = this.space();
+		const embedder = g ? this.embedderOf(g) : undefined;
 		const pointId = memoryPointIdOf(f.factId);
 		const exists = g ? await vectors.exists(g.collectionName) : false;
-		// Content only into an open generation of the reviewed space; a retired
+		// Content only into an open generation of a placed space; a retired
 		// or foreign generation only ever loses the point.
-		const apply =
-			f.state === "confirmed" && !f.deleted && g?.state !== "retired" && !!space && !!g && sameSpace(g, space);
+		const apply = f.state === "confirmed" && !f.deleted && g?.state !== "retired" && !!embedder;
 		if (!apply) {
 			if (g && exists) {
 				await vectors.deleteIds(g.collectionName, [pointId]);
@@ -252,11 +273,10 @@ export class MemoryProjector implements ResultRecords {
 		}
 		// The collection is created by the Index Builder's reconciliation.
 		if (!exists) return { ok: false, retry: true };
-		const inference = this.inference();
-		if (!inference) return { ok: false, retry: false, code: projectionFailure.vectorsUnavailable };
+		if (!embedder) return { ok: false, retry: false, code: projectionFailure.vectorsUnavailable };
 		let embedded: Awaited<ReturnType<InferencePort["embed"]>>;
 		try {
-			embedded = await inference.embed({ taskId, generation: String(target) }, "passage", [f.content]);
+			embedded = await embedder.embed({ taskId, generation: String(target) }, "passage", [f.content]);
 		} catch (err) {
 			if (err instanceof InferenceError && err.retryable) return { ok: false, retry: true };
 			if (err instanceof InferenceMismatch)
@@ -265,6 +285,8 @@ export class MemoryProjector implements ResultRecords {
 			throw err;
 		}
 		const gen = g as IndexGeneration;
+		// P2.7: a vector of another model never enters this generation's collection.
+		if (!vectorsFit(gen, embedded)) return { ok: false, retry: false, code: projectionFailure.profileUnqualified };
 		const payload = payloadOf(f, gen.generation);
 		await vectors.upsert(gen.collectionName, [
 			{
@@ -337,14 +359,13 @@ export class MemoryProjector implements ResultRecords {
 	// Reconciliation: backfill and retry (P17-04); expiry and rebuild (P17-06)
 	// ---------------------------------------------------------------------
 
-	/** The open generations of the reviewed space whose collections exist (memory points go there). */
+	/** The open generations of a placed space (the active or the retained one) whose collections exist (memory points go there). */
 	private async openGenerations(): Promise<IndexGeneration[]> {
-		const space = this.space();
 		const vectors = this.vectors();
-		if (!space || !vectors) return [];
+		if (!vectors) return [];
 		const out: IndexGeneration[] = [];
 		for (const g of await idx.listGenerations(this.store.pool))
-			if (g.state !== "retired" && sameSpace(g, space) && (await vectors.exists(g.collectionName))) out.push(g);
+			if (g.state !== "retired" && this.embedderOf(g) && (await vectors.exists(g.collectionName))) out.push(g);
 		return out;
 	}
 

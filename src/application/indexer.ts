@@ -5,7 +5,8 @@
 //
 // AdvanceIndex serves only the current claimant. Each call embeds one
 // bounded batch of accepted chunks (text read from the verified parser
-// result, never from Qdrant) through Inference and upserts it under the
+// result, never from Qdrant) through the Inference placement of the
+// generation's own vector space (P2.7) and upserts it under the
 // chunks' deterministic point ids, waiting for processing; the entry's
 // watermark moves only after the write is confirmed, so an unanswered or
 // partial upsert is simply written again under the same ids. When every
@@ -15,11 +16,14 @@
 // only result acceptance will take. A generation is accepted (the stable
 // alias moves to it) only after every eligible source revision has an
 // accepted entry and the collection holds exactly the ledger's points.
+// During an embedding-model change the accepted generation keeps its own
+// model through the retained placement until the generation of the active
+// model is accepted.
 // No Qdrant, Inference or storage I/O runs while a row is locked.
 
 import * as idx from "../adapters/indexdb.js";
-import type { InferencePort } from "../adapters/inference.js";
-import { InferenceError, InferenceMismatch } from "../adapters/inference.js";
+import type { InferencePort, Placement } from "../adapters/inference.js";
+import { embedderFor, InferenceError, InferenceMismatch } from "../adapters/inference.js";
 import * as idb from "../adapters/ingestdb.js";
 import type { ObjectStore } from "../adapters/objects.js";
 import * as db from "../adapters/postgres.js";
@@ -42,6 +46,7 @@ import {
 	type SpaceProfile,
 	sameSpace,
 	sourceKeyOf,
+	vectorsFit,
 } from "../domain/index.js";
 import type { Submission, Task } from "../domain/task.js";
 import type { Logger } from "../log.js";
@@ -165,10 +170,24 @@ export class Indexer implements ResultRecords {
 		return task;
 	}
 
-	/** Whether the generation's space is the one the reviewed Inference profile computes. */
-	private computes(g: IndexGeneration): boolean {
-		const s = this.space();
-		return s !== undefined && sameSpace(g, s);
+	private retained: () => Placement | undefined = () => undefined;
+
+	/**
+	 * P2.7: the Inference placement of an earlier embedding space
+	 * (inference.retained). During an embedding-model change the accepted
+	 * generation's entries (new sources and revisions included) are still
+	 * written with that generation's own model while the new generation is
+	 * built with the active one.
+	 */
+	setRetained(p: () => Placement | undefined): void {
+		this.retained = p;
+	}
+
+	/** The placement that computes exactly the generation's space: the active or the retained one (P2.7). */
+	private embedderOf(g: IndexGeneration): InferencePort | undefined {
+		const space = this.space();
+		const inference = this.inference();
+		return embedderFor(g, [space && inference ? { space, inference } : undefined, this.retained()]);
 	}
 
 	private async fail(entry: IndexEntry, code: string): Promise<IndexAnswer> {
@@ -205,7 +224,8 @@ export class Indexer implements ResultRecords {
 		if (!vectors || !inference || !objects) return { state: "failed", failureCode: indexFailure.unavailable };
 		const g = await idx.getGeneration(this.store.pool, input.indexGeneration);
 		if (!g || g.state === "retired") return this.fail(entry, indexFailure.generationRetired);
-		if (!this.computes(g) || g.modelRevision !== input.modelRevision || g.embeddingProfile !== input.embeddingProfile)
+		const embedder = this.embedderOf(g);
+		if (!embedder || g.modelRevision !== input.modelRevision || g.embeddingProfile !== input.embeddingProfile)
 			return this.fail(entry, indexFailure.profileUnqualified);
 		const source = await idb.getSource(this.store.pool, input.sourceId);
 		if (!source || source.deleted) return this.fail(entry, indexFailure.authorizationRevoked);
@@ -251,12 +271,20 @@ export class Indexer implements ResultRecords {
 			}
 			let embedded: Awaited<ReturnType<InferencePort["embed"]>>;
 			try {
-				embedded = await inference.embed({ taskId, generation: String(generation) }, "passage", batch);
+				embedded = await embedder.embed({ taskId, generation: String(generation) }, "passage", batch);
 			} catch (err) {
 				if (err instanceof InferenceError && err.retryable) return this.retry("retry");
 				if (err instanceof InferenceMismatch) return this.fail(entry, indexFailure.profileUnqualified);
 				if (err instanceof InferenceError) return this.fail(entry, indexFailure.computeRefused);
 				throw err;
+			}
+			// P2.7: vectors of another model never enter this generation's collection.
+			if (!vectorsFit(g, embedded)) {
+				this.log.warn("index vectors are not the generation's model space", {
+					taskId,
+					generation: g.generation,
+				});
+				return this.fail(entry, indexFailure.profileUnqualified);
 			}
 			const points: Point[] = rows.map((r, i) => ({
 				id: pointIdOf(r.chunkId),
@@ -517,19 +545,19 @@ export class Indexer implements ResultRecords {
 		}
 	}
 
+	private unserved = 0;
+
 	async reconcile(): Promise<void> {
 		const vectors = this.vectors();
 		const space = this.space();
 		if (!vectors || !space) return;
 		let gens = await idx.listGenerations(this.store.pool);
-		const serving = gens.find(
-			(g) =>
-				g.state !== "retired" &&
-				sameSpace(g, space) &&
-				g.chunkerProfile === space.chunkerProfile &&
-				g.chunkerRevision === space.chunkerRevision,
-		);
-		if (!serving) {
+		const builds = (g: IndexGeneration) =>
+			g.state !== "retired" &&
+			sameSpace(g, space) &&
+			g.chunkerProfile === space.chunkerProfile &&
+			g.chunkerRevision === space.chunkerRevision;
+		if (!gens.some(builds)) {
 			const n = await this.createGeneration();
 			if (n) this.log.info("index generation created", { generation: n, modelRevision: space.modelRevision });
 			gens = await idx.listGenerations(this.store.pool);
@@ -546,7 +574,15 @@ export class Indexer implements ResultRecords {
 			await this.reparse().catch((err) =>
 				this.log.warn("re-ingest not requested", { error: String(err).slice(0, 200) }),
 			);
-		for (const g of gens.filter((x) => x.state === "building" || x.state === "materialized")) {
+		// P2.7: only the newest generation of the active space and chunker
+		// progresses toward acceptance, so the accepted generation keeps
+		// serving with its own profile until exactly that one qualifies; a
+		// building generation of a space the configuration no longer builds
+		// (a reverted model change) is never accepted over it.
+		const target = gens.filter(builds).at(-1);
+		for (const g of gens.filter(
+			(x) => (x.state === "building" || x.state === "materialized") && x.generation === target?.generation,
+		)) {
 			await this.backfill(g);
 			await this.retryFailed(g);
 			await this.qualify(vectors, g);
@@ -554,6 +590,15 @@ export class Indexer implements ResultRecords {
 		gens = await idx.listGenerations(this.store.pool);
 		const accepted = gens.find((g) => g.state === "accepted");
 		if (accepted) await vectors.switchAlias(accepted.collectionName);
+		// Logged once per generation while it lasts.
+		if (!accepted || this.embedderOf(accepted)) this.unserved = 0;
+		else if (this.unserved !== accepted.generation) {
+			this.unserved = accepted.generation;
+			this.log.warn(
+				"the accepted index generation's embedding space has no Inference placement: search and recall refuse it (PROFILE_UNQUALIFIED) until inference.retained places its model or the new generation is accepted",
+				{ generation: accepted.generation, embeddingProfile: accepted.embeddingProfile },
+			);
+		}
 		if (accepted && this.clock.now().getTime() - this.lastCount >= (this.settings().countCheckIntervalMs ?? 600_000))
 			await this.checkCount(vectors, accepted);
 		for (const s of ["building", "materialized", "accepted", "retired"] as const)

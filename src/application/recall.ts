@@ -7,22 +7,30 @@
 // their provenance must still be readable by the caller at its current
 // revision in the Source Registry. The allowed set is bounded; a larger
 // set is refused, never truncated. Search: the query is embedded in the
-// accepted generation's space, and one Query API call's dense and sparse
-// prefetch branches and outer query all carry the allowed fact@revision
-// keys; a point outside that set is never a candidate, whatever Qdrant
-// returned. Recheck: before any content is read (and sent to the reranker)
-// and again immediately before return; content always comes from the
-// authoritative record at the exact revision, never from Qdrant or the
-// Store. Withheld facts leave no trace in the answer. No fact above the
-// profile's floor is an allowed answer.
+// accepted generation's space by the Inference placement of that space
+// (P2.7: during an embedding-model change the retained placement serves the
+// accepted generation's model; an answer of another model is refused), and
+// one Query API call's dense and sparse prefetch branches and outer query
+// all carry the allowed fact@revision keys; a point outside that set is
+// never a candidate, whatever Qdrant returned. Recheck: before any content
+// is read (and sent to the reranker) and again immediately before return;
+// content always comes from the authoritative record at the exact
+// revision, never from Qdrant or the Store. Withheld facts leave no trace
+// in the answer. No fact above the profile's floor is an allowed answer.
 import { createHash } from "node:crypto";
 import * as idx from "../adapters/indexdb.js";
-import { InferenceError, InferenceMismatch, type InferencePort } from "../adapters/inference.js";
+import {
+	embedderFor,
+	InferenceError,
+	InferenceMismatch,
+	type InferencePort,
+	type Placement,
+} from "../adapters/inference.js";
 import * as mdb from "../adapters/memorydb.js";
 import type * as db from "../adapters/postgres.js";
 import { type Filter, type HybridQuery, type VectorIndex, VectorUnavailable } from "../adapters/qdrant.js";
 import * as rdb from "../adapters/retrievaldb.js";
-import { type SpaceProfile, sameSpace, vectorNames } from "../domain/index.js";
+import { type SpaceProfile, vectorNames, vectorsFit } from "../domain/index.js";
 import { type Fact, MemoryError, memoryKeyOf, parseSourceRef } from "../domain/memory.js";
 import { RetrievalError, type RetrievalProfile, stableOrder } from "../domain/retrieval.js";
 import { principalsOf, type Scope } from "../domain/source.js";
@@ -51,6 +59,7 @@ export interface RecallResult {
 export class Recall {
 	private open: () => boolean = () => true;
 	private disclosure: Disclosure | undefined;
+	private retained: () => Placement | undefined = () => undefined;
 
 	constructor(
 		private readonly store: db.Store,
@@ -67,6 +76,11 @@ export class Recall {
 	/** P23: nothing is recalled while the removal inventory is not reconciled. */
 	setGate(open: () => boolean): void {
 		this.open = open;
+	}
+
+	/** P2.7: the Inference placement of an earlier embedding space (inference.retained), for the generation still accepted. */
+	setRetained(p: () => Placement | undefined): void {
+		this.retained = p;
 	}
 
 	/**
@@ -148,8 +162,12 @@ export class Recall {
 		if (!vectors || !inference || !space) throw new MemoryError("UNAVAILABLE", "recall is not configured");
 		const g = (await idx.listGenerations(this.store.pool)).find((x) => x.state === "accepted");
 		if (!g) throw new MemoryError("UNAVAILABLE", "no accepted index generation");
-		if (!sameSpace(g, space))
-			throw new MemoryError("PROFILE_UNQUALIFIED", `generation ${g.generation} is another vector space`);
+		const embedder = embedderFor(g, [{ space, inference }, this.retained()]);
+		if (!embedder)
+			throw new MemoryError(
+				"PROFILE_UNQUALIFIED",
+				`generation ${g.generation} is a vector space no reviewed Inference placement computes`,
+			);
 		const empty = (embeddings = 0): RecallResult => ({
 			facts: [],
 			noAnswer: true,
@@ -166,7 +184,7 @@ export class Recall {
 		inTime();
 		let q: Awaited<ReturnType<InferencePort["embed"]>>;
 		try {
-			q = await inference.embed(
+			q = await embedder.embed(
 				{
 					taskId: `recall-${createHash("sha256").update(`${req.scope.tenantId}\0${req.scope.actorId}\0${req.query}`).digest("hex").slice(0, 32)}`,
 					generation: String(g.generation),
@@ -177,6 +195,11 @@ export class Recall {
 		} catch (err) {
 			throw computeError(err);
 		}
+		if (!vectorsFit(g, q))
+			throw new MemoryError(
+				"PROFILE_UNQUALIFIED",
+				`the query embedding is not generation ${g.generation}'s model space`,
+			);
 		const dense = q.dense[0] as number[];
 		const sparse = q.sparse[0] as { indices: number[]; values: number[] };
 		const filter: Filter = {

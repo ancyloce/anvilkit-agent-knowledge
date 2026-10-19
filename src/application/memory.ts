@@ -17,7 +17,7 @@ import * as idx from "../adapters/indexdb.js";
 import * as mdb from "../adapters/memorydb.js";
 import type * as db from "../adapters/postgres.js";
 import * as rdb from "../adapters/retrievaldb.js";
-import { type SpaceProfile, sameSpace } from "../domain/index.js";
+import { type SpaceProfile, sameSpace, type VectorSpace } from "../domain/index.js";
 import {
 	checkDecider,
 	contentDigestOf,
@@ -79,6 +79,7 @@ function uniqueViolation(err: unknown): string | undefined {
 
 export class Memory {
 	private removals: Removals | undefined;
+	private retained: () => { space: VectorSpace } | undefined = () => undefined;
 
 	constructor(
 		protected readonly store: db.Store,
@@ -89,6 +90,15 @@ export class Memory {
 		protected readonly log: Logger,
 		protected readonly metrics: Metrics,
 	) {}
+
+	/**
+	 * P2.7: the retained Inference placement's space (inference.retained):
+	 * during an embedding-model change a decision is also projected into the
+	 * generation of that space that is still accepted.
+	 */
+	setRetained(p: () => { space: VectorSpace } | undefined): void {
+		this.retained = p;
+	}
 
 	/** P23: removal records and the gate of a restored database. */
 	setRemovals(r: Removals): void {
@@ -572,8 +582,9 @@ export class Memory {
 	/**
 	 * The durable memory-project requests of a fact's new revision: a
 	 * confirmed, undeleted fact is applied to the Store and to every open
-	 * vector generation of the active space; any other state removes it from
-	 * every target it was ever projected to (retired generations included).
+	 * vector generation of the active or the retained space (P2.7); any
+	 * other state removes it from every target it was ever projected to
+	 * (retired generations included).
 	 * A fact that was never projected needs nothing.
 	 */
 	async scheduleIn(c: db.PoolClient, f: Fact): Promise<number> {
@@ -582,9 +593,9 @@ export class Memory {
 		const targets = new Set(rows.map((r) => r.target));
 		if (apply) {
 			targets.add(storeTarget);
-			const space = this.space();
+			const spaces = [this.space(), this.retained()?.space];
 			for (const g of await idx.listGenerations(c))
-				if (g.state !== "retired" && space && sameSpace(g, space)) targets.add(g.generation);
+				if (g.state !== "retired" && spaces.some((s) => s !== undefined && sameSpace(g, s))) targets.add(g.generation);
 		} else if (rows.length === 0) return 0;
 		else targets.add(storeTarget);
 		for (const target of [...targets].sort((a, b) => a - b))
