@@ -187,6 +187,13 @@ inference:
     caSecret:
       name: ""
       key: ca.crt
+  # P2.7: during an embedding-model change, the URL of the second Inference
+  # deployment that still loads the earlier model (the accepted generation's
+  # space) over the same transport; its profile is config.inference.retained
+  # (embedding_profile, embedding_revision, dimensions, sparse_profile).
+  # Empty outside a change.
+  retained:
+    url: ""
 
 # P16: the Qdrant placement (ANVILKIT_KNOWLEDGE_QDRANT_URL) and, when the
 # cluster requires one, its API key from an existing Secret. The collection's

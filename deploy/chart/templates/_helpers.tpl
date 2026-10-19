@@ -123,6 +123,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- fail "inference.tls.caSecret.name is required under inference.tls.mode tls or mtls" }}
 {{- end }}
 {{- end }}
+{{- if and (dig "retained" "url" "" .Values.inference) (not .Values.inference.url) }}
+{{- fail "inference.retained.url places the earlier model of an embedding-model change and needs inference.url" }}
+{{- end }}
 {{- end -}}
 
 {{/* The identity Secret: the rendered Certificate's or the environment's. */}}

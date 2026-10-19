@@ -109,6 +109,10 @@ spec:
             - name: ANVILKIT_KNOWLEDGE_INFERENCE_URL
               value: {{ .Values.inference.url | quote }}
             {{- end }}
+            {{- if dig "retained" "url" "" .Values.inference }}
+            - name: ANVILKIT_KNOWLEDGE_INFERENCE_RETAINED_URL
+              value: {{ .Values.inference.retained.url | quote }}
+            {{- end }}
             {{- if .Values.qdrant.url }}
             - name: ANVILKIT_KNOWLEDGE_QDRANT_URL
               value: {{ .Values.qdrant.url | quote }}
