@@ -61,29 +61,48 @@ export const space: SpaceProfile = {
 const words = (t: string) => t.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
 const bucket = (w: string, n: number) => createHash("sha256").update(w).digest().readUInt32BE(0) % n;
 
+/**
+ * The model a double stands in for (P2.7): its revision, dimensions and a
+ * salt that moves every word to other buckets, so two models' vectors of
+ * the same text do not match (as two real embedding models' would not).
+ */
+export interface DoubleModel {
+	revision: string;
+	dimensions: number;
+	salt: string;
+}
+
 /** A deterministic stand-in for BGE-M3 (bag of hashed words) and the reranker (word overlap). */
 export class HashInference implements InferencePort {
 	embeds = 0;
+	/** P2.7: query and passage embeddings this double computed. */
+	queries = 0;
+	passages = 0;
 	reranks = 0;
 	rerankTexts: string[][] = [];
 	failNext: "retryable" | "refused" | undefined;
 	onRerank?: () => Promise<void>;
 
-	async embed(_c: unknown, _kind: "query" | "passage", inputs: string[]): Promise<Embedded> {
+	constructor(readonly model: DoubleModel = { revision, dimensions: 1024, salt: "" }) {}
+
+	async embed(_c: unknown, kind: "query" | "passage", inputs: string[]): Promise<Embedded> {
 		if (this.failNext) {
 			const f = this.failNext;
 			this.failNext = undefined;
 			throw new InferenceError(f === "retryable" ? 503 : 400, "X", f === "retryable", "double");
 		}
 		this.embeds++;
+		if (kind === "query") this.queries++;
+		else this.passages++;
+		const { dimensions, salt } = this.model;
 		const dense: number[][] = [];
 		const sparse: { indices: number[]; values: number[] }[] = [];
 		for (const t of inputs) {
-			const v = new Array<number>(1024).fill(0);
+			const v = new Array<number>(dimensions).fill(0);
 			const terms = new Map<number, number>();
 			for (const w of words(t)) {
-				v[bucket(w, 1024)] = (v[bucket(w, 1024)] ?? 0) + 1;
-				const k = bucket(`s:${w}`, 250_002);
+				v[bucket(`${salt}${w}`, dimensions)] = (v[bucket(`${salt}${w}`, dimensions)] ?? 0) + 1;
+				const k = bucket(`${salt}s:${w}`, 250_002);
 				terms.set(k, (terms.get(k) ?? 0) + 1);
 			}
 			const norm = Math.hypot(...v) || 1;
@@ -91,7 +110,7 @@ export class HashInference implements InferencePort {
 			const idx = [...terms.keys()].sort((a, b) => a - b);
 			sparse.push({ indices: idx, values: idx.map((i) => terms.get(i) ?? 0) });
 		}
-		return { dense, sparse, modelRevision: revision };
+		return { dense, sparse, modelRevision: this.model.revision };
 	}
 
 	async rerank(_c: unknown, query: string, candidates: { candidateId: string; text: string }[]) {

@@ -6,6 +6,7 @@
 // tasks exactly as the Background Worker does.
 import { Registry } from "prom-client";
 import type { StartedTestContainer } from "testcontainers";
+import type { InferencePort, Placement } from "../src/adapters/inference.js";
 import * as mdb from "../src/adapters/memorydb.js";
 import { type MemoryStorePort, migrateStore, PostgresMemoryStore } from "../src/adapters/memorystore.js";
 import { MemoryObjects } from "../src/adapters/objects.js";
@@ -50,6 +51,9 @@ export interface Kit {
 	metrics: Metrics;
 	bounds: MemoryBounds;
 	activeSpace: { current: SpaceProfile };
+	/** P2.7: the active Inference placement's port (initially `inference`) and the retained placement, both swappable. */
+	activeInference: { current: InferencePort };
+	retained: { current: Placement | undefined };
 	cmd(scope: Scope): Command;
 	stop(): Promise<void>;
 }
@@ -70,11 +74,13 @@ export async function startKit(): Promise<Kit> {
 	let memoryStore: MemoryStorePort | undefined = realStore;
 	const bounds: MemoryBounds = { maxAllowedFacts: 64, maxProjectionEpochs: 3, retryDelayMs: 1000 };
 	const activeSpace = { current: space };
+	const activeInference: { current: InferencePort } = { current: inference };
+	const retained: { current: Placement | undefined } = { current: undefined };
 	const indexer = new Indexer(
 		store,
 		tasks,
 		() => vectors,
-		() => inference,
+		() => activeInference.current,
 		() => objects,
 		() => activeSpace.current,
 		() => ({ batchSize: 8, maxResultBytes: 1 << 20, pollMs: 0 }),
@@ -96,7 +102,7 @@ export async function startKit(): Promise<Kit> {
 		tasks,
 		() => memoryStore,
 		() => vectors,
-		() => inference,
+		() => activeInference.current,
 		() => activeSpace.current,
 		() => bounds,
 		clock,
@@ -106,6 +112,9 @@ export async function startKit(): Promise<Kit> {
 	tasks.setRecords("knowledge-project", indexer);
 	tasks.setRecords("memory-project", projector);
 	indexer.setMemoryGate((g, v) => projector.generationReady(g, v));
+	indexer.setRetained(() => retained.current);
+	memory.setRetained(() => retained.current);
+	projector.setRetained(() => retained.current);
 	const realInventory = new MemoryRemovalInventory();
 	let inventory: MemoryRemovalInventory | undefined = realInventory;
 	const removalBounds: RemovalBounds = { windowMarginMs: 300_000, reconcileIntervalMs: 30_000 };
@@ -148,6 +157,8 @@ export async function startKit(): Promise<Kit> {
 		metrics,
 		bounds,
 		activeSpace,
+		activeInference,
+		retained,
 		cmd: (scope) => ({
 			tenantId: scope.tenantId,
 			commandId: `kit-cmd-${++seq}`,

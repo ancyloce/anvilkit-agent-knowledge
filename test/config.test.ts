@@ -137,6 +137,45 @@ describe("configuration generations", () => {
 		for (const [file, env, want] of cases) expect(() => loadFrom(write(file), env, 1)).toThrow(want);
 	});
 
+	it("places the retained Inference of an embedding-model change from the environment with its complete earlier space (P2.7)", () => {
+		const env = {
+			...base,
+			ANVILKIT_KNOWLEDGE_INFERENCE_URL: "https://inference-next:8000",
+			ANVILKIT_KNOWLEDGE_INFERENCE_RETAINED_URL: "https://inference:8000",
+		};
+		const file = (retained: string) =>
+			`inference:\n  embedding_profile: bge-m3-v2\n  embedding_revision: next\n  tls:\n    ca_file: /etc/ca.crt\n${retained}`;
+		const earlier =
+			"  retained:\n    embedding_profile: bge-m3-v1\n    embedding_revision: 5617a9f61b028005a4858fdac845db406aefb181\n    dimensions: 1024\n    sparse_profile: bge-m3-lexical-v1\n";
+		const g = loadFrom(write(file(earlier)), env, 1);
+		expect(g.config.inference.retained).toEqual({
+			url: "https://inference:8000",
+			serverName: "",
+			embeddingProfile: "bge-m3-v1",
+			embeddingRevision: "5617a9f61b028005a4858fdac845db406aefb181",
+			dimensions: 1024,
+			sparseProfile: "bge-m3-lexical-v1",
+		});
+		// Unplaced, the keys are inert.
+		const { ANVILKIT_KNOWLEDGE_INFERENCE_RETAINED_URL: _r, ...unplaced } = env;
+		expect(loadFrom(write(file(earlier)), unplaced, 1).config.inference.retained.url).toBe("");
+		const { ANVILKIT_KNOWLEDGE_INFERENCE_URL: _a, ...noActive } = env;
+		const cases: [string, NodeJS.ProcessEnv, RegExp][] = [
+			[file("  retained:\n    url: https://inference:8000\n"), unplaced, /secret or a placement/],
+			[file(earlier), noActive, /inference.retained.url needs the active placement/],
+			[file(earlier.replace(/ {4}embedding_revision: .*\n/, "")), env, /embedding_revision is required/],
+			[file(earlier.replace(/ {4}dimensions: .*\n/, "")), env, /inference.retained.dimensions/],
+			[
+				file(earlier),
+				{ ...env, ANVILKIT_KNOWLEDGE_INFERENCE_RETAINED_URL: "http://inference:8000" },
+				/transport of inference.tls.mode/,
+			],
+			// The active profile left at the defaults, which are the retained space.
+			[`inference:\n  tls:\n    ca_file: /etc/ca.crt\n${earlier}`, env, /names the active embedding space/],
+		];
+		for (const [text, e, want] of cases) expect(() => loadFrom(write(text), e, 1), text).toThrow(want);
+	});
+
 	it("reads the secret file and a validated snapshot below the environment; rotation changes only the secret revision", () => {
 		const dir = mkdtempSync(path.join(tmpdir(), "knowledge-config-"));
 		const secret = path.join(dir, "database-url");

@@ -20,17 +20,27 @@ afterAll(async () => {
 });
 
 describe("schema version gate (P3.1)", () => {
-	it("the harness reaches the build's minimum exactly as the migration Job does", async () => {
+	// The migration Job applies every migration it carries; the parent's set
+	// may be ahead of the build's minimum (00013 revokes bookkeeping writes,
+	// which no statement depends on).
+	it("the harness reaches at least the build's minimum, as the migration Job does", async () => {
 		const pool = new pg.Pool({ connectionString: inst.appUrl, max: 1 });
 		try {
-			expect(await schemaVersion(pool)).toBe(minimumSchemaVersion);
+			expect(await schemaVersion(pool)).toBeGreaterThanOrEqual(minimumSchemaVersion);
 		} finally {
 			await pool.end();
 		}
 	});
 
 	it("withholds readiness behind the minimum, names both versions and recovers without a restart", async () => {
-		await inst.admin("DELETE FROM goose_db_version WHERE version_id = $1", [minimumSchemaVersion]);
+		// Behind the minimum: the minimum's row and every row after it are taken
+		// away, and given back afterwards.
+		const removed = (
+			await inst.admin("DELETE FROM goose_db_version WHERE version_id >= $1 RETURNING version_id", [
+				minimumSchemaVersion,
+			])
+		).rows.map((r) => Number(r.version_id));
+		const ahead = Math.max(minimumSchemaVersion + 1, ...removed.map((v) => v + 1));
 		const pool = new pg.Pool({ connectionString: inst.appUrl, max: 1 });
 		const errors: string[] = [];
 		const log: Logger = { info: () => {}, warn: () => {}, error: (m, f) => errors.push(`${m} ${String(f?.error)}`) };
@@ -56,18 +66,22 @@ describe("schema version gate (P3.1)", () => {
 				minimumSchemaVersion,
 			]);
 			await expect.poll(async () => (await fetch(url)).status).toBe(200);
-			// One ahead (the next release's expand migration) is accepted.
-			await inst.admin("INSERT INTO goose_db_version (version_id, is_applied) VALUES ($1, true)", [
-				minimumSchemaVersion + 1,
-			]);
-			const ahead = new SchemaGate(() => schemaVersion(pool), minimumSchemaVersion, 20, log);
-			await ahead.run();
-			expect(ahead.satisfied()).toBe(true);
+			// Ahead of the minimum (the next release's expand migration) is accepted.
+			await inst.admin("INSERT INTO goose_db_version (version_id, is_applied) VALUES ($1, true)", [ahead]);
+			const aheadGate = new SchemaGate(() => schemaVersion(pool), minimumSchemaVersion, 20, log);
+			await aheadGate.run();
+			expect(aheadGate.satisfied()).toBe(true);
 		} finally {
 			gate.stop();
 			server.close();
 			await pool.end();
-			await inst.admin("DELETE FROM goose_db_version WHERE version_id = $1", [minimumSchemaVersion + 1]);
+			await inst.admin("DELETE FROM goose_db_version WHERE version_id = $1", [ahead]);
+			for (const v of removed) {
+				await inst.admin(
+					"INSERT INTO goose_db_version (version_id, is_applied) SELECT $1, true WHERE NOT EXISTS (SELECT 1 FROM goose_db_version WHERE version_id = $1)",
+					[v],
+				);
+			}
 		}
 	});
 });
