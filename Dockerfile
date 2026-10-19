@@ -20,7 +20,7 @@ COPY src ./src
 RUN pnpm run build
 RUN pnpm install --frozen-lockfile --ignore-scripts --prod
 
-FROM golang:1.27.0-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS forwarder-build
+FROM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS forwarder-build
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG GONOSUMDB=
 ENV GOWORK=off GOFLAGS=-mod=readonly CGO_ENABLED=0 GOPROXY=$GOPROXY GONOSUMDB=$GONOSUMDB
@@ -31,7 +31,7 @@ COPY forwarder/cmd ./cmd
 COPY forwarder/internal ./internal
 RUN go build -trimpath -ldflags="-s -w" -o /out/anvilkit-knowledge-forwarder ./cmd/anvilkit-knowledge-forwarder
 
-FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS forwarder
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS forwarder
 COPY --from=forwarder-build /out/anvilkit-knowledge-forwarder /usr/local/bin/anvilkit-knowledge-forwarder
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/anvilkit-knowledge-forwarder"]
@@ -42,10 +42,11 @@ WORKDIR /anvilkit/knowledge
 # removed so their bundled packages (and their advisories) are not shipped.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
       /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
-# Debian security fixes the base digest predates (CRITICAL with a fixed
-# version: CVE-2026-13221/42496/8376 perl-base), pinned to the fixed version.
+# Debian security fixes the base digest predates (with a fixed version:
+# CRITICAL CVE-2026-13221/42496/8376 perl-base; HIGH
+# CVE-2026-86145/89157/89161/103111 libpcre2), pinned to the fixed versions.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends --only-upgrade perl-base=5.36.0-7+deb12u4 \
+ && apt-get install -y --no-install-recommends --only-upgrade perl-base=5.36.0-7+deb12u4 libpcre2-8-0=10.42-1+deb12u2 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/node_modules ./node_modules
 COPY --from=build /src/dist ./dist
