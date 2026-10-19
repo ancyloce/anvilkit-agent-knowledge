@@ -61,8 +61,11 @@ export interface SpaceProfile {
 	chunkerRevision: number;
 }
 
+/** The bindings of one vector space (a generation's, or what one Inference placement computes), without the chunker. */
+export type VectorSpace = Omit<SpaceProfile, "chunkerProfile" | "chunkerRevision">;
+
 /** A generation serves a profile only when every binding of its vector space is equal. */
-export function sameSpace(g: Omit<SpaceProfile, "chunkerProfile" | "chunkerRevision">, p: SpaceProfile): boolean {
+export function sameSpace(g: VectorSpace, p: VectorSpace): boolean {
 	return (
 		g.modelId === p.modelId &&
 		g.modelRevision === p.modelRevision &&
@@ -70,6 +73,20 @@ export function sameSpace(g: Omit<SpaceProfile, "chunkerProfile" | "chunkerRevis
 		g.dimensions === p.dimensions &&
 		g.sparseProfile === p.sparseProfile
 	);
+}
+
+/**
+ * P2.7: whether computed vectors belong to generation g's space: the
+ * answer names g's model revision and every dense vector has g's
+ * dimensions. Vectors of another model (an embedding-model change keeps
+ * two spaces alive, often of equal dimensions) are never written into a
+ * generation's collection or compared with its points.
+ */
+export function vectorsFit(
+	g: Pick<VectorSpace, "modelRevision" | "dimensions">,
+	got: { modelRevision: string; dense: number[][] },
+): boolean {
+	return got.modelRevision === g.modelRevision && got.dense.every((v) => v.length === g.dimensions);
 }
 
 export type EntryState = "pending" | "running" | "materialized" | "accepted" | "failed" | "stale";

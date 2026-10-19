@@ -272,6 +272,20 @@ export async function start(
 	removals.setSourceTarget(sources);
 	retrieval.setGate(() => removals.ready());
 	retrieval.setIndexHealth(() => indexer.documentsHealthy());
+	// P2.7: during an embedding-model change the accepted generation keeps
+	// serving (search, recall, new entries and memory points) with its own
+	// model through the retained placement until the new one is accepted.
+	const retained = () => gens.runtime()?.retained;
+	indexer.setRetained(retained);
+	retrieval.setRetained(retained);
+	recall.setRetained(retained);
+	projector.setRetained(retained);
+	memory.setRetained(retained);
+	if (cfg.inference.retained.url)
+		log.info("embedding-model change: the retained Inference placement serves its earlier space", {
+			embeddingProfile: cfg.inference.retained.embeddingProfile,
+			activeProfile: cfg.inference.embeddingProfile,
+		});
 	indexer.setReparse(() => sources.requestReparse(50));
 	snapshots.setGate(() => removals.ready());
 	projector.setGate(() => removals.ready());

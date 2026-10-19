@@ -109,6 +109,23 @@ export interface Config {
 		dimensions: number;
 		rerankProfile: string;
 		rerankRevision: string;
+		/**
+		 * P2.7: the Inference placement of an earlier embedding space during an
+		 * embedding-model change (inference.retained; url is a placement,
+		 * ANVILKIT_KNOWLEDGE_INFERENCE_RETAINED_URL): a second Inference
+		 * deployment that loads the earlier model, over the transport of
+		 * inference.tls (serverName: the URL host by default). The accepted
+		 * generation of that space keeps serving with it until the generation
+		 * of the active profile is accepted. Unplaced (empty url) outside a change.
+		 */
+		retained: {
+			url: string;
+			serverName: string;
+			embeddingProfile: string;
+			embeddingRevision: string;
+			dimensions: number;
+			sparseProfile: string;
+		};
 	};
 	qdrant: {
 		url: string;
@@ -222,6 +239,7 @@ const envOverrides: Record<string, string> = {
 	ANVILKIT_KNOWLEDGE_KUBECONFIG: "parser.kubeconfig",
 	ANVILKIT_KNOWLEDGE_IMAGE_REGISTRY: "parser.image_registry",
 	ANVILKIT_KNOWLEDGE_INFERENCE_URL: "inference.url",
+	ANVILKIT_KNOWLEDGE_INFERENCE_RETAINED_URL: "inference.retained.url",
 	ANVILKIT_KNOWLEDGE_QDRANT_URL: "qdrant.url",
 	ANVILKIT_KNOWLEDGE_QDRANT_API_KEY: "qdrant.api_key",
 	ANVILKIT_KNOWLEDGE_QDRANT_API_KEY_FILE: "qdrant.api_key_file",
@@ -256,6 +274,7 @@ const placementKeys = [
 	"parser.kubeconfig",
 	"parser.image_registry",
 	"inference.url",
+	"inference.retained.url",
 	"qdrant.url",
 	"qdrant.api_key_file",
 	"store.url_file",
@@ -442,6 +461,12 @@ const known = new Set([
 	"inference.dimensions",
 	"inference.rerank_profile",
 	"inference.rerank_revision",
+	"inference.retained.url",
+	"inference.retained.server_name",
+	"inference.retained.embedding_profile",
+	"inference.retained.embedding_revision",
+	"inference.retained.dimensions",
+	"inference.retained.sparse_profile",
 	"qdrant.url",
 	"qdrant.api_key",
 	"qdrant.api_key_file",
@@ -873,6 +898,54 @@ function clientTls(raw: Raw, key: string, development: boolean, errors: string[]
 	return t;
 }
 
+/**
+ * P2.7: the retained Inference placement (inference.retained). Placed, it
+ * needs the active placement, a URL over the same transport mode and the
+ * complete earlier space (profile, model revision, dimensions, sparse
+ * profile); unplaced, its keys are inert.
+ */
+function retainedPlacement(
+	raw: Raw,
+	activeUrl: string,
+	tls: ClientTls,
+	errors: string[],
+): Config["inference"]["retained"] {
+	const read = (k: string) => {
+		try {
+			return str(raw, `inference.retained.${k}`);
+		} catch (err) {
+			errors.push(err instanceof Error ? err.message : String(err));
+			return "";
+		}
+	};
+	const url = read("url");
+	const out = {
+		url,
+		serverName: read("server_name"),
+		embeddingProfile: read("embedding_profile"),
+		embeddingRevision: read("embedding_revision"),
+		dimensions: 0,
+		sparseProfile: read("sparse_profile"),
+	};
+	if (!url) return out;
+	if (!activeUrl) errors.push("inference.retained.url needs the active placement inference.url");
+	if (!/^https?:\/\//.test(url)) errors.push("inference.retained.url must be an HTTP(S) URL");
+	else if (url.startsWith("http://") !== (tls.mode === "development"))
+		errors.push("inference.retained.url must use the transport of inference.tls.mode (http:// only under development)");
+	const required: [string, string][] = [
+		["embedding_profile", out.embeddingProfile],
+		["embedding_revision", out.embeddingRevision],
+		["sparse_profile", out.sparseProfile],
+	];
+	for (const [k, v] of required) if (!v) errors.push(`inference.retained.${k} is required with inference.retained.url`);
+	try {
+		out.dimensions = int(raw, "inference.retained.dimensions", 1, 65_536);
+	} catch (err) {
+		errors.push(err instanceof Error ? err.message : String(err));
+	}
+	return out;
+}
+
 function validate(raw: Raw): Config {
 	const errors: string[] = [];
 	const attempt = <T>(fn: () => T, fallback: T): T => {
@@ -986,6 +1059,7 @@ function validate(raw: Raw): Config {
 		errors.push(
 			"inference.tls.mode mtls presents the workload certificate and needs grpc.identity.cert_file, key_file and ca_file",
 		);
+	const retained = retainedPlacement(raw, inferenceUrl, inferenceTls, errors);
 	const qdrantUrl = attempt(() => str(raw, "qdrant.url"), "");
 	if (qdrantUrl && !/^https?:\/\//.test(qdrantUrl)) errors.push("qdrant.url must be an HTTP(S) URL");
 	const qdrantTls = httpsError("qdrant.url", qdrantUrl, development);
@@ -1108,6 +1182,7 @@ function validate(raw: Raw): Config {
 			dimensions: attempt(() => int(raw, "inference.dimensions", 1, 65_536), 1024),
 			rerankProfile: attempt(() => str(raw, "inference.rerank_profile"), ""),
 			rerankRevision: attempt(() => str(raw, "inference.rerank_revision"), ""),
+			retained,
 		},
 		qdrant: {
 			url: qdrantUrl,
@@ -1208,6 +1283,15 @@ function validate(raw: Raw): Config {
 	if (cfg.retrieval.rerankLimit > cfg.retrieval.fusedLimit)
 		errors.push("retrieval.rerank_limit must not exceed retrieval.fused_limit");
 	if (cfg.index.batchSize > cfg.inference.maxBatch) errors.push("index.batch_size must not exceed inference.max_batch");
+	const r = cfg.inference.retained;
+	if (
+		r.url &&
+		r.embeddingProfile === cfg.inference.embeddingProfile &&
+		r.embeddingRevision === cfg.inference.embeddingRevision &&
+		r.dimensions === cfg.inference.dimensions &&
+		r.sparseProfile === cfg.index.sparseProfile
+	)
+		errors.push("inference.retained names the active embedding space; it places an earlier one");
 
 	if (errors.length > 0) throw new ConfigError(`config: ${errors.join("; ")}`);
 	return cfg;

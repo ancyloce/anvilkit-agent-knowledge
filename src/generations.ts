@@ -7,7 +7,7 @@
 // they froze.
 import { readFileSync } from "node:fs";
 import type pg from "pg";
-import { InferenceClient, type InferenceTransport } from "./adapters/inference.js";
+import { InferenceClient, type InferenceTransport, type Placement } from "./adapters/inference.js";
 import { admitParserProfile, type ParserProfile, parserProfile } from "./adapters/jobcontract.js";
 import { type Kube, KubeClient, loadKubeConfig } from "./adapters/kube.js";
 import { type MemoryStorePort, PostgresMemoryStore } from "./adapters/memorystore.js";
@@ -64,6 +64,8 @@ export interface Runtime {
 	kube?: Kube;
 	parser?: ParserProfile;
 	inference?: InferenceClient;
+	/** P2.7: the retained Inference placement of an earlier embedding space (inference.retained), during a model change. */
+	retained?: Placement;
 	vectors?: VectorIndex;
 	/** P17: the PostgresStore projection (its own pool under the Store role). */
 	memoryStore?: MemoryStorePort;
@@ -142,6 +144,34 @@ export async function buildRuntime(gen: Generation, previous?: Runtime): Promise
 				inferenceTransport(inf.tls, identity),
 			)
 		: undefined;
+	const r = inf.retained;
+	// P2.7: the second deployment computes only the earlier embedding space
+	// (Knowledge never reranks through it); its answers bind that profile.
+	const retained: Placement | undefined =
+		inference && r.url
+			? {
+					space: {
+						modelId: "bge-m3",
+						modelRevision: r.embeddingRevision,
+						embeddingProfile: r.embeddingProfile,
+						dimensions: r.dimensions,
+						sparseProfile: r.sparseProfile,
+					},
+					inference: new InferenceClient(
+						r.url,
+						inf.timeoutMs,
+						{
+							embeddingProfileId: r.embeddingProfile,
+							embeddingModelRevision: r.embeddingRevision,
+							dimensions: r.dimensions,
+							rerankProfileId: inf.rerankProfile,
+							rerankModelRevision: inf.rerankRevision,
+						},
+						undefined,
+						inferenceTransport({ ...inf.tls, serverName: r.serverName }, identity),
+					),
+				}
+			: undefined;
 	const q = c.qdrant;
 	const vectors = q.url
 		? new QdrantIndex({
@@ -206,7 +236,7 @@ export async function buildRuntime(gen: Generation, previous?: Runtime): Promise
 				idleInTransactionTimeoutMs: Math.max(db.statementTimeoutMs * 2, 60_000),
 			})
 		: undefined;
-	return { gen, pool, identity, objects, kube, parser, inference, vectors, memoryStore, removals, cleanup };
+	return { gen, pool, identity, objects, kube, parser, inference, retained, vectors, memoryStore, removals, cleanup };
 }
 
 /** Drains the pool within the limit; reports whether the limit cut it short. */

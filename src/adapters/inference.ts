@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { components } from "@anvilkit/generated-clients/openapi/inference";
 import { parseStrictJson } from "@anvilkit/generated-clients/validation/json";
+import { sameSpace, type VectorSpace } from "../domain/index.js";
 
 type EmbeddingRequest = components["schemas"]["EmbeddingRequest"];
 type EmbeddingResponse = components["schemas"]["EmbeddingResponse"];
@@ -65,6 +66,29 @@ export interface Embedded {
 
 /** What the use cases need from Inference (tests substitute a deterministic double). */
 export type InferencePort = Pick<InferenceClient, "embed" | "rerank">;
+
+/**
+ * P2.7: one Inference placement and the vector space it computes. An
+ * Inference deployment loads one fixed embedding model and refuses any
+ * other profile (PROFILE_UNQUALIFIED), so an embedding-model change runs
+ * two deployments for its duration: the active placement (inference.url)
+ * computes the space new generations are built for and reranks; the
+ * retained placement (inference.retained) computes the earlier space of the
+ * generation that is still accepted, until the new one is accepted.
+ */
+export interface Placement {
+	space: VectorSpace;
+	inference: InferencePort;
+}
+
+/**
+ * The placement that computes exactly generation g's space, or none: a
+ * generation is never embedded or queried through another model's
+ * placement.
+ */
+export function embedderFor(g: VectorSpace, placements: (Placement | undefined)[]): InferencePort | undefined {
+	return placements.find((p) => p !== undefined && sameSpace(g, p.space))?.inference;
+}
 
 /**
  * The transport of the Inference connection (P0.1): development is the
