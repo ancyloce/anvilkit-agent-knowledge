@@ -104,6 +104,11 @@ func TestNodeRowsForwardedToJetStream(t *testing.T) {
 	if _, err := mig.Exec(ctx, "REVOKE CREATE ON SCHEMA public FROM PUBLIC"); err != nil {
 		t.Fatal(err)
 	}
+	// goose creates its bookkeeping table before 00001 runs, and the migrations
+	// grant and revoke on it (00013): the raw replay creates it the same way.
+	if _, err := mig.Exec(ctx, `CREATE TABLE IF NOT EXISTS goose_db_version (id serial PRIMARY KEY, version_id bigint NOT NULL, is_applied boolean NOT NULL, tstamp timestamp NOT NULL DEFAULT now())`); err != nil {
+		t.Fatal(err)
+	}
 	files, _ := filepath.Glob(filepath.Join(migrations, "*.sql"))
 	for _, f := range files {
 		raw, _ := os.ReadFile(f)
