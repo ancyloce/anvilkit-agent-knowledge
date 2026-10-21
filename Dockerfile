@@ -18,6 +18,11 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json build.mjs ./
 RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY src ./src
 RUN pnpm run build
+# The runtime dependencies alone, installed in a directory of their own: a
+# --prod install over the full one above removes nothing, and the image
+# shipped every development package (vite, vitest, typescript, biome).
+WORKDIR /prod
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --ignore-scripts --prod
 
 FROM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS forwarder-build
@@ -48,7 +53,7 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends --only-upgrade perl-base=5.36.0-7+deb12u4 libpcre2-8-0=10.42-1+deb12u2 \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=build /src/node_modules ./node_modules
+COPY --from=build /prod/node_modules ./node_modules
 COPY --from=build /src/dist ./dist
 COPY package.json ./package.json
 COPY config.yaml /etc/anvilkit/anvilkit-agent-knowledge/config.yaml
