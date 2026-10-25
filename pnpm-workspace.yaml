@@ -16,8 +16,11 @@ allowBuilds:
   ssh2: false
 minimumReleaseAgeExclude:
   - '@types/node@24.13.5'
-# Security fix that the exact pin forbids: @qdrant/js-client-rest 1.19.0 pins
-# undici 7.29.0 (CVE-2026-19534, CVE-2026-84961, fixed in 7.29.1). The selector
-# names the vulnerable version only; drop it once the pin moves past it.
+# Security fixes that the exact pins forbid (release policy: no fixable HIGH):
+# @qdrant/js-client-rest 1.19.0 pins undici 7.29.x (CVE-2026-19534,
+# CVE-2026-84961, CVE-2026-109869; fixed in 7.30.1) and @langchain/core
+# 1.2.13 pins zod 4.6.5 (CVE-2023-54404, fixed in 4.6.6). Each selector
+# names the vulnerable line only; drop it once the pin moves past it.
 overrides:
-  undici@7.29.0: 7.29.1
+  undici@<8: 7.30.1
+  zod: 4.6.6
