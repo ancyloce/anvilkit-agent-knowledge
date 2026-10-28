@@ -37,5 +37,5 @@ The request and its `background.requested` event commit or roll back together; a
 The generated contract consumers are an explicit versioned dependency, never a sibling checkout or a replace directive; the pin is the generated line below (read from the manifest by the parent's `tools/docs-status.py`, checked by its `tools/check-docs.py`).
 
 <!-- generated:contracts -->
-Contracts: this build pins `@anvilkit/generated-clients` to contracts commit `e502c1d` (`package.json`; tag `go/v0.1.19`).
+Contracts: this build pins `@anvilkit/generated-clients` to contracts commit `74584f7` (`package.json`; tag `go/v0.1.20`).
 <!-- /generated:contracts -->
