@@ -16,7 +16,7 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
-    "@anvilkit/generated-clients": "github:ancyloce/anvilkit-agent-contracts#28a873192a26ec55ce6dcfb39ffa305c085e1d88&path:ts",
+    "@anvilkit/generated-clients": "github:ancyloce/anvilkit-agent-contracts#b5c2ab6ae29c3b35911d6e5bdaa0252afc7f238d&path:ts",
     "@aws-sdk/client-s3": "3.1134.0",
     "@aws-sdk/s3-request-presigner": "3.1134.0",
     "@bufbuild/protobuf": "2.15.0",
