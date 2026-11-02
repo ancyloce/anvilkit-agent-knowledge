@@ -1,5 +1,5 @@
-// The production build: two ESM entries under dist/ (the service and the
-// DEVELOPMENT_ONLY local-check owner entry point) with the generated contract
+// The production build: one ESM bundle under dist/ per entry point listed in
+// entryPoints below (the service and its command-line entries), with the generated contract
 // consumers (@anvilkit/generated-clients, TypeScript sources of the pinned
 // contracts commit) compiled in and every other package left external, so
 // the runtime resolves the locked node_modules of this package and nothing
