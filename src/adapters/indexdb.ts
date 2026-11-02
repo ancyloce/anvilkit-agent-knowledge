@@ -219,6 +219,44 @@ export async function updateEntry(
 	return r.rowCount ?? 0;
 }
 
+interface ChunksTableRow {
+	chunk_id: string;
+	source_id: string;
+	source_revision: string;
+	parser_profile: string;
+	parser_profile_revision: string;
+	chunker_profile: string;
+	chunker_revision: string;
+	ordinal: string;
+	locator: string;
+	content_digest: string;
+	content_ref: string;
+	quality_flags: string[];
+	ingest_request_id: string;
+}
+
+const chunkSelect = `SELECT chunk_id, source_id, source_revision::text AS source_revision, parser_profile,
+	parser_profile_revision::text AS parser_profile_revision, chunker_profile, chunker_revision::text AS chunker_revision,
+	ordinal::text AS ordinal, locator, content_digest, content_ref, quality_flags, ingest_request_id FROM chunks`;
+
+function chunkFromRow(r: ChunksTableRow): ChunkRow {
+	return {
+		chunkId: r.chunk_id,
+		sourceId: r.source_id,
+		sourceRevision: Number(r.source_revision),
+		parserProfile: r.parser_profile,
+		parserProfileRevision: Number(r.parser_profile_revision),
+		chunkerProfile: r.chunker_profile,
+		chunkerRevision: Number(r.chunker_revision),
+		ordinal: Number(r.ordinal),
+		locator: r.locator,
+		contentDigest: r.content_digest,
+		contentRef: r.content_ref,
+		qualityFlags: r.quality_flags,
+		ingestRequestId: r.ingest_request_id,
+	};
+}
+
 /** The accepted chunks of an ingest request in ordinal order, a page at a time. */
 export async function chunkPage(
 	c: Queryable,
@@ -226,85 +264,19 @@ export async function chunkPage(
 	fromOrdinal: number,
 	limit: number,
 ): Promise<ChunkRow[]> {
-	const r = await c.query<{
-		chunk_id: string;
-		source_id: string;
-		source_revision: string;
-		parser_profile: string;
-		parser_profile_revision: string;
-		chunker_profile: string;
-		chunker_revision: string;
-		ordinal: string;
-		locator: string;
-		content_digest: string;
-		content_ref: string;
-		quality_flags: string[];
-		ingest_request_id: string;
-	}>(
-		`SELECT chunk_id, source_id, source_revision::text AS source_revision, parser_profile,
-		   parser_profile_revision::text AS parser_profile_revision, chunker_profile, chunker_revision::text AS chunker_revision,
-		   ordinal::text AS ordinal, locator, content_digest, content_ref, quality_flags, ingest_request_id
-		 FROM chunks WHERE ingest_request_id = $1 AND ordinal >= $2 ORDER BY ordinal LIMIT $3`,
+	const r = await c.query<ChunksTableRow>(
+		`${chunkSelect} WHERE ingest_request_id = $1 AND ordinal >= $2 ORDER BY ordinal LIMIT $3`,
 		[ingestRequestId, fromOrdinal, limit],
 	);
-	return r.rows.map((x) => ({
-		chunkId: x.chunk_id,
-		sourceId: x.source_id,
-		sourceRevision: Number(x.source_revision),
-		parserProfile: x.parser_profile,
-		parserProfileRevision: Number(x.parser_profile_revision),
-		chunkerProfile: x.chunker_profile,
-		chunkerRevision: Number(x.chunker_revision),
-		ordinal: Number(x.ordinal),
-		locator: x.locator,
-		contentDigest: x.content_digest,
-		contentRef: x.content_ref,
-		qualityFlags: x.quality_flags,
-		ingestRequestId: x.ingest_request_id,
-	}));
+	return r.rows.map(chunkFromRow);
 }
 
 /** The chunks with the given ids (retrieval reads only these). */
 export async function chunksById(c: Queryable, chunkIds: string[]): Promise<Map<string, ChunkRow>> {
 	const out = new Map<string, ChunkRow>();
 	if (chunkIds.length === 0) return out;
-	const r = await c.query<{
-		chunk_id: string;
-		source_id: string;
-		source_revision: string;
-		ordinal: string;
-		locator: string;
-		content_digest: string;
-		content_ref: string;
-		quality_flags: string[];
-		ingest_request_id: string;
-		parser_profile: string;
-		parser_profile_revision: string;
-		chunker_profile: string;
-		chunker_revision: string;
-	}>(
-		`SELECT chunk_id, source_id, source_revision::text AS source_revision, ordinal::text AS ordinal, locator, content_digest,
-		   content_ref, quality_flags, ingest_request_id, parser_profile, parser_profile_revision::text AS parser_profile_revision,
-		   chunker_profile, chunker_revision::text AS chunker_revision
-		 FROM chunks WHERE chunk_id = ANY($1::text[])`,
-		[chunkIds],
-	);
-	for (const x of r.rows)
-		out.set(x.chunk_id, {
-			chunkId: x.chunk_id,
-			sourceId: x.source_id,
-			sourceRevision: Number(x.source_revision),
-			parserProfile: x.parser_profile,
-			parserProfileRevision: Number(x.parser_profile_revision),
-			chunkerProfile: x.chunker_profile,
-			chunkerRevision: Number(x.chunker_revision),
-			ordinal: Number(x.ordinal),
-			locator: x.locator,
-			contentDigest: x.content_digest,
-			contentRef: x.content_ref,
-			qualityFlags: x.quality_flags,
-			ingestRequestId: x.ingest_request_id,
-		});
+	const r = await c.query<ChunksTableRow>(`${chunkSelect} WHERE chunk_id = ANY($1::text[])`, [chunkIds]);
+	for (const x of r.rows) out.set(x.chunk_id, chunkFromRow(x));
 	return out;
 }
 
@@ -454,6 +426,30 @@ export interface FailedEntry {
 	failureCode: string;
 }
 
+interface FailedEntryRow {
+	task_id: string;
+	source_id: string;
+	source_revision: string;
+	ingest_request_id: string;
+	tenant_id: string;
+	chunk_count: number;
+	attempts: number;
+	failure_code: string | null;
+}
+
+function failedEntryFromRow(r: FailedEntryRow): FailedEntry {
+	return {
+		taskId: r.task_id,
+		sourceId: r.source_id,
+		sourceRevision: Number(r.source_revision),
+		ingestRequestId: r.ingest_request_id,
+		tenantId: r.tenant_id,
+		chunkCount: r.chunk_count,
+		attempts: r.attempts,
+		failureCode: r.failure_code ?? "",
+	};
+}
+
 /**
  * Failed entries of a generation whose revision is still eligible (current,
  * not deleted, parsed with the generation's chunker), failed before `before`.
@@ -464,16 +460,7 @@ export async function failedEligible(
 	before: Date,
 	limit: number,
 ): Promise<FailedEntry[]> {
-	const r = await c.query<{
-		task_id: string;
-		source_id: string;
-		source_revision: string;
-		ingest_request_id: string;
-		tenant_id: string;
-		chunk_count: number;
-		attempts: number;
-		failure_code: string | null;
-	}>(
+	const r = await c.query<FailedEntryRow>(
 		`SELECT e.task_id, e.source_id, e.source_revision::text, e.ingest_request_id, s.tenant_id, e.chunk_count, e.attempts, e.failure_code
 		 FROM index_entries e
 		 JOIN sources s ON s.source_id = e.source_id AND s.current_revision = e.source_revision AND NOT s.deleted
@@ -482,16 +469,7 @@ export async function failedEligible(
 		 ORDER BY e.failed_at NULLS FIRST, e.task_id LIMIT $5`,
 		[g.generation, g.chunkerProfile, g.chunkerRevision, before, limit],
 	);
-	return r.rows.map((x) => ({
-		taskId: x.task_id,
-		sourceId: x.source_id,
-		sourceRevision: Number(x.source_revision),
-		ingestRequestId: x.ingest_request_id,
-		tenantId: x.tenant_id,
-		chunkCount: x.chunk_count,
-		attempts: x.attempts,
-		failureCode: x.failure_code ?? "",
-	}));
+	return r.rows.map(failedEntryFromRow);
 }
 
 /** A failed entry starts its next attempt from the first chunk (false when it changed meanwhile). */
@@ -529,16 +507,7 @@ export async function ledgerPoints(c: Queryable, generation: number): Promise<nu
  * the entries to request again.
  */
 export async function resetForRebuild(c: PoolClient, generation: number): Promise<FailedEntry[]> {
-	const r = await c.query<{
-		task_id: string;
-		source_id: string;
-		source_revision: string;
-		ingest_request_id: string;
-		tenant_id: string;
-		chunk_count: number;
-		attempts: number;
-		failure_code: string | null;
-	}>(
+	const r = await c.query<FailedEntryRow>(
 		`UPDATE index_entries e SET state = 'pending', written_through = 0, point_count = NULL, manifest_digest = NULL,
 		   failure_code = NULL, failed_at = NULL, attempts = e.attempts + 1, updated_at = now()
 		 FROM sources s
@@ -547,16 +516,9 @@ export async function resetForRebuild(c: PoolClient, generation: number): Promis
 		 RETURNING e.task_id, e.source_id, e.source_revision::text, e.ingest_request_id, s.tenant_id, e.chunk_count, e.attempts, e.failure_code`,
 		[generation],
 	);
-	return r.rows.map((x) => ({
-		taskId: x.task_id,
-		sourceId: x.source_id,
-		sourceRevision: Number(x.source_revision),
-		ingestRequestId: x.ingest_request_id,
-		tenantId: x.tenant_id,
-		chunkCount: x.chunk_count,
-		attempts: x.attempts - 1,
-		failureCode: x.failure_code ?? "",
-	}));
+	// RETURNING reports the incremented attempts; the entry to request again
+	// carries the count before this reset, as failedEligible's entries do.
+	return r.rows.map((x) => ({ ...failedEntryFromRow(x), attempts: x.attempts - 1 }));
 }
 
 /**

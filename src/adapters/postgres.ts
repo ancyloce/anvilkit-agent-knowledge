@@ -11,9 +11,7 @@ import type { Attempt, Task, TaskState } from "../domain/task.js";
 const { Pool } = pg;
 export type PoolClient = pg.PoolClient;
 
-/** The forwarder topic and the adapter's envelope, as the Go forwarder unwraps it. */
-export const forwarderTopic = "outbox";
-
+/** The event metadata keys of the forwarder envelope, as the Go publishers write them. */
 export const metadataKeys = {
 	eventType: "anvilkit_event_type",
 	tenantId: "anvilkit_tenant_id",
