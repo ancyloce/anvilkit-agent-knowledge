@@ -1,26 +1,25 @@
-// Knowledge's grpc-js transport (A03): anvilkit.knowledge.v1
-// BackgroundTaskService (P14), SourceService and IngestService (P15). Every
-// decoded request passes
-// the contract's explicit TypeScript validation (protovalidate over the
-// generated descriptors) before its handler; domain errors map to the
-// public codes of contracts.md §4. The listener is plaintext
-// mTLS-only under a ServerIdentity (P0.1): TLS 1.3, client certificates
-// required and verified against the watched bundle, every RPC authorized
-// by the peer's workload identity ahead of the handler; the plaintext
-// listener exists only for the DEVELOPMENT_ONLY mode the configuration
-// loader admits under development.enabled.
+// Knowledge's grpc-js transport (A03): the anvilkit.knowledge.v1
+// BackgroundTaskService (P14), SourceService and IngestService (P15),
+// SnapshotService and RetrievalService (P16) and MemoryService (P17). Every
+// decoded request passes the contract's explicit TypeScript validation
+// (protovalidate over the generated descriptors) before its handler; domain
+// errors map to the public codes of contracts.md §4 (grpcstatus.ts) and
+// records to their messages through protomap.ts. The listener is mTLS-only
+// under a ServerIdentity (P0.1): TLS 1.3, client certificates required and
+// verified against the watched bundle, every RPC authorized by the peer's
+// workload identity ahead of the handler; the plaintext listener exists only
+// for the DEVELOPMENT_ONLY mode the configuration loader admits under
+// development.enabled.
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { X509Certificate } from "node:crypto";
 import {
-	AccessEntry,
 	AdvanceIndexRequest,
 	type AdvanceIndexResponse,
 	AdvanceParseRequest,
 	type AdvanceParseResponse,
 	AdvanceProjectionRequest,
 	type AdvanceProjectionResponse,
-	BackgroundTask,
 	type BackgroundTaskServiceServer,
 	BackgroundTaskServiceService,
 	BeginUploadRequest,
@@ -37,9 +36,6 @@ import {
 	type DeleteFactResponse,
 	DeleteSourceRequest,
 	type DeleteSourceResponse,
-	FactDecision,
-	FactOrigin,
-	FactState,
 	GetFactRequest,
 	type GetFactResponse,
 	GetSnapshotRequest,
@@ -53,12 +49,10 @@ import {
 	IndexState,
 	type IngestServiceServer,
 	IngestServiceService,
-	IngestState,
 	ListFactsRequest,
 	type ListFactsResponse,
 	ListSourcesRequest,
 	type ListSourcesResponse,
-	MemoryFact,
 	type MemoryServiceServer,
 	MemoryServiceService,
 	ParseState,
@@ -72,16 +66,12 @@ import {
 	RetrievalServiceService,
 	SearchRequest,
 	type SearchResponse,
-	Snapshot,
 	type SnapshotServiceServer,
 	SnapshotServiceService,
-	Source,
-	SourceKind,
 	type SourceServiceServer,
 	SourceServiceService,
 	SubmitTaskResultRequest,
 	type SubmitTaskResultResponse,
-	TaskState,
 	UpdateSourceAccessRequest,
 	type UpdateSourceAccessResponse,
 } from "@anvilkit/generated-clients/proto/anvilkit/knowledge/v1/knowledge";
@@ -105,13 +95,14 @@ import type { Snapshots } from "../application/snapshots.js";
 import type { Sources } from "../application/sources.js";
 import type { Tasks } from "../application/tasks.js";
 import { IndexError } from "../domain/index.js";
-import { type Fact, MemoryError } from "../domain/memory.js";
+import { MemoryError } from "../domain/memory.js";
 import { ParseError } from "../domain/parse.js";
-import { type Snapshot as DomainSnapshot, RetrievalError } from "../domain/retrieval.js";
+import { RetrievalError } from "../domain/retrieval.js";
 import * as domain from "../domain/source.js";
-import { type Task, TaskError } from "../domain/task.js";
+import { TaskError } from "../domain/task.js";
 import type { RpcObserver } from "../telemetry.js";
 import { requestIdMetadata } from "../telemetry.js";
+import { toStatus } from "./grpcstatus.js";
 import {
 	createAuthorizer,
 	type IdentityWatcher,
@@ -121,6 +112,22 @@ import {
 	serverCredentials,
 } from "./identity.js";
 import { api } from "./policy.js";
+import {
+	accessOf,
+	commandOf,
+	decisionOf,
+	factStateOf,
+	factToProto,
+	generationOf,
+	kindOf,
+	originOf,
+	sequenceOf,
+	snapshotToProto,
+	sourceToProto,
+	toProto,
+} from "./protomap.js";
+
+export { factToProto, snapshotToProto, sourceToProto, toProto } from "./protomap.js";
 
 // The verified workload of the call in progress (P0.3): user roles in a
 // request's scope count only when the API workload carries them.
@@ -133,147 +140,6 @@ function callerOf(raw: Buffer | undefined): Principal | undefined {
 	} catch {
 		return undefined;
 	}
-}
-
-const stateOf: Record<Task["state"], TaskState> = {
-	pending: TaskState.TASK_STATE_PENDING,
-	leased: TaskState.TASK_STATE_LEASED,
-	result_submitted: TaskState.TASK_STATE_RESULT_SUBMITTED,
-	accepted: TaskState.TASK_STATE_ACCEPTED,
-	retry_scheduled: TaskState.TASK_STATE_RETRY_SCHEDULED,
-	dead: TaskState.TASK_STATE_DEAD,
-	stale: TaskState.TASK_STATE_STALE,
-	canceled: TaskState.TASK_STATE_CANCELED,
-};
-
-export function toProto(t: Task): BackgroundTask {
-	return BackgroundTask.fromPartial({
-		taskId: t.taskId,
-		generation: String(t.generation),
-		taskKind: t.kind,
-		inputDigest: t.inputDigest,
-		state: stateOf[t.state],
-		workerId: t.workerId || undefined,
-		leaseUntil: t.state === "leased" && t.leaseUntil ? t.leaseUntil : undefined,
-		attemptCount: String(t.attemptCount),
-	});
-}
-
-const kindOf: Record<number, domain.SourceKind> = {
-	[SourceKind.SOURCE_KIND_DOCUMENT]: "document",
-	[SourceKind.SOURCE_KIND_URL]: "url",
-	[SourceKind.SOURCE_KIND_REPOSITORY]: "repository",
-	[SourceKind.SOURCE_KIND_BRAND]: "brand",
-};
-const kindTo: Record<domain.SourceKind, SourceKind> = {
-	document: SourceKind.SOURCE_KIND_DOCUMENT,
-	url: SourceKind.SOURCE_KIND_URL,
-	repository: SourceKind.SOURCE_KIND_REPOSITORY,
-	brand: SourceKind.SOURCE_KIND_BRAND,
-};
-const ingestTo: Record<domain.IngestState, IngestState> = {
-	pending: IngestState.INGEST_STATE_PENDING,
-	parsing: IngestState.INGEST_STATE_PARSING,
-	indexing: IngestState.INGEST_STATE_INDEXING,
-	indexed: IngestState.INGEST_STATE_INDEXED,
-	failed: IngestState.INGEST_STATE_FAILED,
-	stale: IngestState.INGEST_STATE_STALE,
-};
-
-/** The public Source: identities, revisions, digest, ACL and ingest state; never the storage key. */
-export function sourceToProto(s: domain.Source): Source {
-	return Source.fromPartial({
-		sourceId: s.sourceId,
-		tenantId: s.tenantId,
-		projectId: s.projectId,
-		kind: kindTo[s.kind],
-		locator: s.locator,
-		currentRevision: String(s.currentRevision),
-		contentDigest: s.contentDigest,
-		aclRevision: String(s.aclRevision),
-		access: s.access.map((e) =>
-			AccessEntry.fromPartial({
-				principalType: e.principalType,
-				principalId: e.principalId,
-				permission: e.permission ?? "read",
-			}),
-		),
-		ingest: ingestTo[s.ingest],
-		deleted: s.deleted,
-		createdAt: s.createdAt,
-		updatedAt: s.updatedAt,
-	});
-}
-
-/** The public Snapshot: identities, the generation, exact revisions (<source>@<revision>) and the frozen digest. */
-export function snapshotToProto(s: DomainSnapshot): Snapshot {
-	return Snapshot.fromPartial({
-		snapshotId: s.snapshotId,
-		tenantId: s.tenantId,
-		projectId: s.projectId,
-		indexGeneration: String(s.generation),
-		sourceRevisions: s.sources.map((x) => `${x.sourceId}@${x.sourceRevision}`),
-		contentDigest: s.contentDigest,
-		createdAt: s.createdAt,
-	});
-}
-
-const factStateTo: Record<Fact["state"], FactState> = {
-	proposed: FactState.FACT_STATE_PROPOSED,
-	confirmed: FactState.FACT_STATE_CONFIRMED,
-	rejected: FactState.FACT_STATE_REJECTED,
-	revoked: FactState.FACT_STATE_REVOKED,
-	expired: FactState.FACT_STATE_EXPIRED,
-};
-const factStateOf: Record<number, Fact["state"]> = {
-	[FactState.FACT_STATE_PROPOSED]: "proposed",
-	[FactState.FACT_STATE_CONFIRMED]: "confirmed",
-	[FactState.FACT_STATE_REJECTED]: "rejected",
-	[FactState.FACT_STATE_REVOKED]: "revoked",
-	[FactState.FACT_STATE_EXPIRED]: "expired",
-};
-const originOf: Record<number, Fact["origin"]> = {
-	[FactOrigin.FACT_ORIGIN_USER]: "user",
-	[FactOrigin.FACT_ORIGIN_MODEL]: "model",
-	[FactOrigin.FACT_ORIGIN_WORKER]: "worker",
-};
-const originTo: Record<Fact["origin"], FactOrigin> = {
-	user: FactOrigin.FACT_ORIGIN_USER,
-	model: FactOrigin.FACT_ORIGIN_MODEL,
-	worker: FactOrigin.FACT_ORIGIN_WORKER,
-};
-const decisionOf: Record<number, "confirm" | "reject" | "revoke"> = {
-	[FactDecision.FACT_DECISION_CONFIRM]: "confirm",
-	[FactDecision.FACT_DECISION_REJECT]: "reject",
-	[FactDecision.FACT_DECISION_REVOKE]: "revoke",
-};
-
-/** The public MemoryFact: identities, state, revision, provenance and, unless deleted, the content. */
-export function factToProto(f: Fact): MemoryFact {
-	return MemoryFact.fromPartial({
-		factId: f.factId,
-		tenantId: f.tenantId,
-		subjectType: f.subjectType,
-		subjectId: f.subjectId,
-		scopeId: f.scopeId,
-		content: f.deleted ? "" : f.content,
-		contentDigest: f.contentDigest,
-		state: factStateTo[f.state],
-		revision: String(f.revision),
-		proposer: f.proposer,
-		confirmer: f.confirmer || undefined,
-		sourceRefs: f.sourceRefs,
-		expiresAt: f.expiresAt ?? undefined,
-		createdAt: f.createdAt,
-		updatedAt: f.updatedAt,
-		origin: originTo[f.origin],
-		deleted: f.deleted,
-	});
-}
-
-function commandOf(c: { tenantId: string; commandId: string; actorId: string; requestDigest: string } | undefined) {
-	if (!c) throw new domain.SourceError("INVALID_ARGUMENT", "command is required");
-	return { tenantId: c.tenantId, commandId: c.commandId, actorId: c.actorId, requestDigest: c.requestDigest };
 }
 
 /**
@@ -300,136 +166,6 @@ function scopeOf(
 	const caller = callers.getStore();
 	const fromApi = caller?.namespace === api.namespace && caller.serviceAccount === api.serviceAccount;
 	return { tenantId: s.tenantId, projectId: s.projectId, actorId: s.actorId, roles: fromApi ? [...s.roles] : [] };
-}
-
-function accessOf(entries: AccessEntry[]): domain.AccessEntry[] {
-	return entries.map((e) => ({
-		principalType: e.principalType as domain.PrincipalType,
-		principalId: e.principalId,
-		...(e.permission === "manage" ? { permission: "manage" as const } : {}),
-	}));
-}
-
-function sequenceOf(v: string, what: string): number {
-	if (!/^(0|[1-9][0-9]{0,15})$/.test(v)) throw new domain.SourceError("INVALID_ARGUMENT", what);
-	return Number(v);
-}
-
-function toStatus(err: unknown): ServiceError {
-	const e = (code: status, message: string) =>
-		Object.assign(new Error(message), { code, details: message, metadata: undefined }) as unknown as ServiceError;
-	if (err instanceof ParseError) {
-		switch (err.code) {
-			case "NOT_FOUND":
-				return e(status.NOT_FOUND, "NOT_FOUND");
-			case "STALE_EXECUTION":
-				return e(status.FAILED_PRECONDITION, err.message);
-			case "INVALID_ARGUMENT":
-				return e(status.INVALID_ARGUMENT, err.message);
-			default:
-				return e(status.UNAVAILABLE, "DEPENDENCY_UNAVAILABLE");
-		}
-	}
-	if (err instanceof IndexError) {
-		switch (err.code) {
-			case "NOT_FOUND":
-				return e(status.NOT_FOUND, "NOT_FOUND");
-			case "STALE_EXECUTION":
-				return e(status.FAILED_PRECONDITION, err.message);
-			case "INVALID_ARGUMENT":
-				return e(status.INVALID_ARGUMENT, err.message);
-			default:
-				return e(status.UNAVAILABLE, "DEPENDENCY_UNAVAILABLE");
-		}
-	}
-	if (err instanceof RetrievalError) {
-		switch (err.code) {
-			case "NOT_FOUND":
-				return e(status.NOT_FOUND, "NOT_FOUND");
-			case "FORBIDDEN":
-				return e(status.PERMISSION_DENIED, err.message);
-			case "COMMAND_CONFLICT":
-				return e(status.ALREADY_EXISTS, err.message);
-			case "NOT_INDEXED":
-			case "PROFILE_UNQUALIFIED":
-				return e(status.FAILED_PRECONDITION, err.message);
-			case "SCOPE_TOO_LARGE":
-				return e(status.RESOURCE_EXHAUSTED, err.message);
-			case "DEADLINE_EXCEEDED":
-				return e(status.DEADLINE_EXCEEDED, "DEADLINE_EXCEEDED");
-			case "UNAVAILABLE":
-				return e(status.UNAVAILABLE, "DEPENDENCY_UNAVAILABLE");
-			default:
-				return e(status.INVALID_ARGUMENT, err.message);
-		}
-	}
-	if (err instanceof MemoryError) {
-		switch (err.code) {
-			case "NOT_FOUND":
-				return e(status.NOT_FOUND, "NOT_FOUND");
-			case "FORBIDDEN":
-				return e(status.PERMISSION_DENIED, err.message);
-			case "COMMAND_CONFLICT":
-				return e(status.ALREADY_EXISTS, err.message);
-			case "REVISION_MISMATCH":
-			case "INVALID_TRANSITION":
-			case "PROVENANCE_STALE":
-			case "FACT_CONFLICT":
-			case "EXPIRED":
-			case "PROFILE_UNQUALIFIED":
-			case "STALE_EXECUTION":
-				return e(status.FAILED_PRECONDITION, err.message);
-			case "SCOPE_TOO_LARGE":
-				return e(status.RESOURCE_EXHAUSTED, err.message);
-			case "DEADLINE_EXCEEDED":
-				return e(status.DEADLINE_EXCEEDED, "DEADLINE_EXCEEDED");
-			case "UNAVAILABLE":
-				return e(status.UNAVAILABLE, "DEPENDENCY_UNAVAILABLE");
-			default:
-				return e(status.INVALID_ARGUMENT, err.message);
-		}
-	}
-	if (err instanceof domain.SourceError) {
-		switch (err.code) {
-			case "NOT_FOUND":
-				return e(status.NOT_FOUND, "NOT_FOUND");
-			case "FORBIDDEN":
-				return e(status.PERMISSION_DENIED, err.message);
-			case "COMMAND_CONFLICT":
-				return e(status.ALREADY_EXISTS, err.message);
-			case "REVISION_MISMATCH":
-				return e(status.FAILED_PRECONDITION, err.message);
-			case "UNAVAILABLE":
-				return e(status.UNAVAILABLE, "DEPENDENCY_UNAVAILABLE");
-			default:
-				return e(status.INVALID_ARGUMENT, err.message);
-		}
-	}
-	if (err instanceof TaskError) {
-		switch (err.code) {
-			case "NOT_FOUND":
-				return e(status.NOT_FOUND, "NOT_FOUND");
-			case "INVALID_ARGUMENT":
-			case "INPUT_TOO_LARGE":
-				return e(status.INVALID_ARGUMENT, err.message);
-			case "ALREADY_CLAIMED":
-			case "NOT_CLAIMABLE":
-			case "WORKER_IDENTITY_REUSED":
-			case "STALE_EXECUTION":
-				return e(status.FAILED_PRECONDITION, `STALE_EXECUTION: ${err.message}`);
-			case "EFFECT_UNCERTAIN":
-			case "PROFILE_UNQUALIFIED":
-				return e(status.FAILED_PRECONDITION, err.message);
-			case "FORBIDDEN":
-				return e(status.PERMISSION_DENIED, err.message);
-		}
-	}
-	return e(status.UNAVAILABLE, "DEPENDENCY_UNAVAILABLE");
-}
-
-function generationOf(s: string): number {
-	if (!/^[1-9][0-9]{0,18}$/.test(s)) throw new TaskError("INVALID_ARGUMENT", `generation ${s}`);
-	return Number(s);
 }
 
 /** Validates a decoded ts-proto request through the contract boundary. */
