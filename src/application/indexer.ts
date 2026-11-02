@@ -504,29 +504,7 @@ export class Indexer implements ResultRecords {
 		return this.store.inTx(async (c) => {
 			const entries = await idx.resetForRebuild(c, generation);
 			for (const f of entries) {
-				const input: IndexInput = {
-					schemaVersion: 1,
-					computation: indexProfile,
-					attempt: f.attempts + 1,
-					sourceId: f.sourceId,
-					sourceRevision: f.sourceRevision,
-					ingestRequestId: f.ingestRequestId,
-					indexGeneration: g.generation,
-					chunkCount: f.chunkCount,
-					embeddingProfile: g.embeddingProfile,
-					modelRevision: g.modelRevision,
-				};
-				await this.tasks.requestIn(c, {
-					taskId: f.taskId,
-					tenantId: f.tenantId,
-					kind: "knowledge-project",
-					profile: indexProfile,
-					input: JSON.stringify(input),
-					effects: "reconstructible",
-					dispatchId: "",
-					authorizationRef: `source:${f.sourceId}`,
-					correlationId: `index-rebuild-${g.generation}`,
-				});
+				await this.requestNextAttempt(c, g, f, `index-rebuild-${g.generation}`);
 			}
 			this.log.info("document rebuild requested", { generation, entries: entries.length });
 			return entries.length;
@@ -632,29 +610,7 @@ export class Indexer implements ResultRecords {
 			}
 			await this.store.inTx(async (c) => {
 				if (!(await idx.retryEntry(c, f.taskId, f.attempts))) return;
-				const input: IndexInput = {
-					schemaVersion: 1,
-					computation: indexProfile,
-					attempt: f.attempts + 1,
-					sourceId: f.sourceId,
-					sourceRevision: f.sourceRevision,
-					ingestRequestId: f.ingestRequestId,
-					indexGeneration: g.generation,
-					chunkCount: f.chunkCount,
-					embeddingProfile: g.embeddingProfile,
-					modelRevision: g.modelRevision,
-				};
-				await this.tasks.requestIn(c, {
-					taskId: f.taskId,
-					tenantId: f.tenantId,
-					kind: "knowledge-project",
-					profile: indexProfile,
-					input: JSON.stringify(input),
-					effects: "reconstructible",
-					dispatchId: "",
-					authorizationRef: `source:${f.sourceId}`,
-					correlationId: `index-retry-${g.generation}`,
-				});
+				await this.requestNextAttempt(c, g, f, `index-retry-${g.generation}`);
 			});
 			this.metrics.indexBatches.inc({ outcome: "retried" });
 			this.log.info("index entry attempted again", {
@@ -663,6 +619,43 @@ export class Indexer implements ResultRecords {
 				failureCode: f.failureCode,
 			});
 		}
+	}
+
+	/**
+	 * The knowledge-project request of a retried or rebuilt entry's next
+	 * attempt, a new task generation from its first chunk. It is written in
+	 * the caller's transaction, so the entry's reset and its request commit
+	 * together; the input's field order is the one earlier attempts wrote.
+	 */
+	private async requestNextAttempt(
+		c: db.PoolClient,
+		g: IndexGeneration,
+		f: idx.FailedEntry,
+		correlationId: string,
+	): Promise<void> {
+		const input: IndexInput = {
+			schemaVersion: 1,
+			computation: indexProfile,
+			attempt: f.attempts + 1,
+			sourceId: f.sourceId,
+			sourceRevision: f.sourceRevision,
+			ingestRequestId: f.ingestRequestId,
+			indexGeneration: g.generation,
+			chunkCount: f.chunkCount,
+			embeddingProfile: g.embeddingProfile,
+			modelRevision: g.modelRevision,
+		};
+		await this.tasks.requestIn(c, {
+			taskId: f.taskId,
+			tenantId: f.tenantId,
+			kind: "knowledge-project",
+			profile: indexProfile,
+			input: JSON.stringify(input),
+			effects: "reconstructible",
+			dispatchId: "",
+			authorizationRef: `source:${f.sourceId}`,
+			correlationId,
+		});
 	}
 
 	/** Every eligible revision of a generation that has no entry yet gets one (idempotent). */

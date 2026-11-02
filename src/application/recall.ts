@@ -16,7 +16,9 @@
 // is read (and sent to the reranker) and again immediately before return;
 // content always comes from the authoritative record at the exact
 // revision, never from Qdrant or the Store. Withheld facts leave no trace
-// in the answer. No fact above the profile's floor is an allowed answer.
+// in the answer. A fact whose rerank score is below the profile's floor
+// (`minRerankScore`, inclusive) is never an answer; a candidate the reranker
+// did not score counts as below it.
 import { createHash } from "node:crypto";
 import * as idx from "../adapters/indexdb.js";
 import {
