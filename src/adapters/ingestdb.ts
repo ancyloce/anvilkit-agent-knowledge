@@ -538,13 +538,6 @@ export async function insertChunks(c: PoolClient, rows: ChunkRow[]): Promise<voi
 	}
 }
 
-export async function countChunks(c: Queryable, ingestRequestId: string): Promise<number> {
-	const r = await c.query<{ n: string }>("SELECT count(*)::text AS n FROM chunks WHERE ingest_request_id = $1", [
-		ingestRequestId,
-	]);
-	return Number(r.rows[0]?.n ?? 0);
-}
-
 /** The object a source revision binds, only when it is the given content. */
 export async function revisionObject(
 	c: Queryable,
