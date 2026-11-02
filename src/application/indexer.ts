@@ -15,7 +15,8 @@
 // exactly (stray points are deleted) and records the manifest digest: the
 // only result acceptance will take. A generation is accepted (the stable
 // alias moves to it) only after every eligible source revision has an
-// accepted entry and the collection holds exactly the ledger's points.
+// accepted (or quarantined) entry and the collection holds exactly the
+// ledger's points.
 // During an embedding-model change the accepted generation keeps its own
 // model through the retained placement until the generation of the active
 // model is accepted.
@@ -425,7 +426,8 @@ export class Indexer implements ResultRecords {
 
 	// ---------------------------------------------------------------------
 	// Reconciliation: generations, collections, backfill, qualification,
-	// alias and the deletion purge (P16-05).
+	// alias and the deletion purge (P16-05); re-ingest, retries and the
+	// count check (P2.7).
 	// ---------------------------------------------------------------------
 
 	private ensured = new Set<string>();
@@ -682,8 +684,9 @@ export class Indexer implements ResultRecords {
 	}
 
 	/**
-	 * building -> materialized when every eligible revision is accepted and
-	 * the collection's exact point count equals the ledger; materialized ->
+	 * building -> materialized when every eligible revision is accepted (or
+	 * quarantined), the collection's exact document point count equals the
+	 * ledger and the memory gate agrees; materialized ->
 	 * accepted after the same check again, with the previous accepted
 	 * generation retired in the same transaction. A materialized generation
 	 * that no longer qualifies (a newer source arrived) returns to building.

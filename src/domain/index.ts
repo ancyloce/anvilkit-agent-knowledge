@@ -14,10 +14,10 @@ export const collectionOf = (generation: number): string => `${alias}-${generati
 export const vectorNames = { dense: "dense", sparse: "sparse" } as const;
 
 /**
- * The payload fields with explicit indexes; filters use nothing else. Since
- * P17 a generation's collection also holds memory points (kind "memory",
- * no source fields): document filters name source keys, so they never match
- * a memory point, and memory filters name memory keys.
+ * The payload fields with explicit indexes; filters use nothing else. A
+ * generation's collection also holds memory points (P17: kind "memory", no
+ * source fields): document filters name source keys, so they never match a
+ * memory point, and memory filters name memory keys.
  */
 export const payloadIndexes = {
 	tenant_id: "keyword",
@@ -237,8 +237,9 @@ export function pointMismatch(
 
 /**
  * A building generation is materialized when every eligible source
- * revision has an accepted entry and the collection holds exactly the
- * ledger's points (the watermark); anything else keeps it building.
+ * revision has an accepted (or, P2.7, quarantined) entry, none waits for a
+ * re-parse under the generation's chunker, and the collection holds exactly
+ * the ledger's points (the watermark); anything else keeps it building.
  */
 export function qualifies(p: {
 	eligible: number;

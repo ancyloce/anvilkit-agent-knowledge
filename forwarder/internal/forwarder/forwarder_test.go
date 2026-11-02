@@ -359,8 +359,8 @@ func TestNATSCredentialsAndServerName(t *testing.T) {
 		}
 	}
 
-	// Under the guard no credential is admitted, a placed one is still
-	// classified and used, a broken one is still rejected.
+	// Under the guard a missing credential is admitted, a placed one is
+	// still classified and used, a broken one is still rejected.
 	dev := []string{"ANVILKIT_FORWARDER_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_knowledge?sslmode=disable", "ANVILKIT_FORWARDER_NATS_URL=nats://127.0.0.1:4222", "ANVILKIT_FORWARDER_DEVELOPMENT_ENABLED=true", "ANVILKIT_FORWARDER_NATS_TLS_MODE=development"}
 	if g, err := forwarder.Load(dev, 1); err != nil || g.Config.NATSCredsFile != "" {
 		t.Fatalf("development without a credential: %v", err)

@@ -1,5 +1,6 @@
-// Throwaway CAs and leaves for the identity tests (openssl in a temporary
-// directory): no Kubernetes, no cert-manager, nothing outside the test.
+// Throwaway CAs and leaves for the identity and TLS tests (openssl in a
+// temporary directory): no Kubernetes, no cert-manager, nothing outside the
+// test.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,7 +46,7 @@ export function newCA(name: string): CA {
 	return { dir, pem: readFileSync(path.join(dir, "ca.crt")) };
 }
 
-/** Issues a leaf with the given URI SANs (none for a certificate without a workload identity), localhost and 127.0.0.1. */
+/** Issues a leaf with the given URI SANs (none for a certificate without a workload identity), localhost, 127.0.0.1 and the given DNS names. */
 export function issue(ca: CA, cn: string, uris: string[], dnsNames: string[] = [], days = 1): Leaf {
 	const out = mkdtempSync(path.join(tmpdir(), "anvilkit-leaf-"));
 	const san = [

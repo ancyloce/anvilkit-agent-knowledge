@@ -1,10 +1,11 @@
 # Independent verification of anvilkit-agent-knowledge from this repository
 # alone: the TypeScript service type-checks, lints, builds and tests
-# (Docker-backed PostgreSQL 17 through Testcontainers; the anvilkit_knowledge
-# migrations still live in the parent repository's migration Job until
-# Knowledge owns them — the sparse checkout below supplies them read-only),
-# the Go forwarder sidecar builds, vets and tests (the Node rows of the built
-# package read by the pinned adapter into a real JetStream), the two images
+# (Docker-backed PostgreSQL 17, Qdrant and MinIO through Testcontainers;
+# the anvilkit_knowledge migrations still live in the parent repository's
+# migration Job until Knowledge owns them — the sparse checkout below
+# supplies them read-only), the Go forwarder sidecar builds, vets and tests
+# (the Node rows of the built package read by the pinned adapter into a real
+# JetStream), the two images
 # from the repository root, and the chart's lint and render.
 name: ci
 on:

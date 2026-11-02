@@ -1,10 +1,10 @@
 // Bootstrap of anvilkit-agent-knowledge (DD-09 §3): the first configuration
-// generation and its probed pool, metrics, the owner use case, the probe
-// listener, the gRPC listener, the lease sweeper and the generation
-// watcher; a failed start unwinds what it created. SIGTERM withdraws
-// readiness and new admission, drains the server within its bound (forced
-// stop afterwards), stops the loops, records the drain and closes the
-// generation's pool last, with the probe listener after it.
+// generation and its probed pool, metrics, the use cases, the probe
+// listener, the gRPC listener, the lease sweeper, the reconciler and the
+// generation watcher; a failed start unwinds what it created. SIGTERM
+// withdraws readiness and new admission, drains the server within its
+// bound (forced stop afterwards), stops the loops, records the drain and
+// closes the generation's pool last, with the probe listener after it.
 import { type ChannelCredentials, type ChannelOptions, credentials } from "@grpc/grpc-js";
 import { collectDefaultMetrics, Registry } from "prom-client";
 import { ControlDisclosure, ControlDispatchQuery } from "./adapters/control.js";

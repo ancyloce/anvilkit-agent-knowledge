@@ -2,8 +2,8 @@
 // (DD-09 §2). Fx orders the lifecycle: the probe/metrics listener first,
 // the first generation's runtime probed before anything runs, the
 // generation watcher, then readiness; on stop readiness is withdrawn, the
-// forwarder drains within its close timeout (forced afterwards), the
-// watcher stops and the connections close, the probe listener last.
+// watcher stops, the forwarder drains within its close timeout (forced
+// afterwards) and the connections close, the probe listener last.
 package main
 
 import (

@@ -254,7 +254,8 @@ describe("launch", () => {
 		expect(kube.deletes).toContain(`/apis/batch/v1/namespaces/anvilkit-parsing/jobs/${key}`);
 		expect(await advance(taskId, "w1", inputDigest)).toEqual(done);
 
-		// A submission that is not the recorded result consumes the attempt instead of accepting.
+		// The recorded result is accepted: its chunks are stored with their locators,
+		// quality flags and content references, and the source moves to indexing.
 		if (done.state !== "completed") throw new Error("unreachable");
 		const accepted = await tasks.submit(taskId, 1, {
 			workerId: "w1",

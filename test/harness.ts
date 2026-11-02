@@ -3,7 +3,8 @@
 // jobs/migration/internal/migrate/sql/knowledge, found beside this
 // repository or named by ANVILKIT_KNOWLEDGE_MIGRATIONS_DIR): the "+goose Up"
 // sections applied in order by the migrator role, exactly the DDL the Job
-// applies. Tests skip when Docker or the directory is unavailable.
+// applies. Tests never skip: without Docker the container fails to start,
+// and without the directory startInstance throws an UNEXECUTED error.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";

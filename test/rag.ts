@@ -1,12 +1,14 @@
 // Shared fixtures of the P16 tests: a real Qdrant 1.19.0 node, a
 // deterministic Inference double and a seeder that leaves a parsed source
-// exactly as P15's acceptance does (source, revision, ACL revision, ingest
-// request in state indexing, accepted chunks and the verified parser result
-// object the chunk texts are read from). The double hashes words into a
-// normalized 1024-d dense vector and a sparse term vector, so lexical and
-// "semantic" overlap behave predictably; it validates the Index Builder and
-// Retrieval mechanics, never retrieval quality (that is the evaluation run
-// against the real BGE-M3 service, tests/evals/rag).
+// as the trusted parse acceptance (Ingest.onAccepted) does (source,
+// revision, ACL revision, ingest request in state indexing, accepted chunks
+// and the verified parser result object the chunk texts are read from),
+// without the index scheduling that acceptance runs in the same transaction
+// (indexSeeded or the test's own scheduleIn does it). The double hashes
+// words into a normalized 1024-d dense vector and a sparse term vector, so
+// lexical and "semantic" overlap behave predictably; it validates the Index
+// Builder and Retrieval mechanics, never retrieval quality (that is the
+// evaluation run against the real BGE-M3 service, tests/evals/rag).
 import { createHash } from "node:crypto";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { type Embedded, InferenceError, type InferencePort } from "../src/adapters/inference.js";
@@ -138,8 +140,9 @@ export interface Seeded {
 }
 
 /**
- * A parsed source as P15's acceptance leaves it. The ACL defaults to the
- * tenant; texts become chunks 0..n-1 of one parser result object.
+ * A parsed source as the parse acceptance (Ingest.onAccepted) leaves it,
+ * before its index scheduling. The ACL defaults to the tenant; texts become
+ * chunks 0..n-1 of one parser result object.
  */
 export async function seedParsed(
 	inst: Instance,

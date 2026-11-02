@@ -1,10 +1,11 @@
-// Memory removal records (P23; execution.md §4 recovery, SEC-06): the
-// immutable evidence of one deletion or revocation that lives outside the
-// business database. Its key names the database's removal scope (the
-// inventory belongs to that database alone; a restore keeps the scope),
-// then orders records by the database time the decision committed under,
-// so the window a restore may have erased is a key range; the hash part
-// binds the (tenant, command) identity the decision was taken under. Only
+// Removal records of memory facts (P23) and, below, of sources (P2.7)
+// (execution.md §4 recovery, SEC-06): the immutable evidence of one
+// deletion or revocation that lives outside the business database. Its key
+// names the database's removal scope (the inventory belongs to that
+// database alone; a restore keeps the scope), then orders records by the
+// database time the decision committed under, so the window a restore may
+// have erased is a key range; the hash part binds the (tenant, command)
+// identity the decision was taken under. Only
 // identities, revisions and digests are recorded: never fact content.
 // Pure functions.
 import { createHash } from "node:crypto";
@@ -133,8 +134,8 @@ export function parseRemoval(scope: string, key: string, bytes: Buffer): Removal
  * content of any fact not yet deleted, at the time it was taken. A
  * revocation ends a confirmed fact; if the restore erased the confirmation
  * as well, the proposal still becomes revoked (with the recorded confirmer)
- * so no retried confirmation revives what the user revoked. A deleted,
- * rejected, revoked or expired fact needs nothing.
+ * so no retried confirmation revives what the user revoked. A deleted fact
+ * needs nothing; a rejected, revoked or expired one needs no revocation.
  */
 export function restoredRemoval(f: Fact, r: RemovalRecord): Fact | undefined {
 	if (f.deleted) return undefined;

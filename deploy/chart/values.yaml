@@ -79,19 +79,21 @@ database:
     name: ""
     key: url
 
-# Credential delivery (P0.6). kubernetes mounts the existing Secrets named
-# in this file (database, objects, removals, qdrant.apiKeySecret,
-# store.secret, nats.credentials, forwarder.database, relay.database,
-# relay.queue): the development foundation's path. csi mounts the
+# Credential delivery (P0.6). kubernetes mounts or references the existing
+# Secrets named in this file (database, objects, removals,
+# qdrant.apiKeySecret, store.secret, cleanup.secret, nats.credentials,
+# forwarder.database, relay.database, relay.queue): the development
+# foundation's path. csi mounts the
 # credentials from OpenBao through the Secrets Store CSI driver (provider
 # openbao, Kubernetes auth with the Pod's ServiceAccount token of audience
 # csi.audience; no Kubernetes Secret is synced) read-only at
 # /var/run/secrets/anvilkit/csi in the containers that read them. The
 # service's KV v2 path holds database-url, objects-credentials,
-# removals-credentials, qdrant-api-key and store-database-url (Knowledge),
-# forwarder-database-url and nats-creds (forwarder), relay-database-url,
-# relay-queue-url and relay-nats-creds (relay), each key only while its
-# feature is configured.
+# removals-credentials, qdrant-api-key, store-database-url and
+# cleanup-database-url (Knowledge), forwarder-database-url and nats-creds
+# (forwarder), relay-database-url, relay-queue-url and relay-nats-creds
+# (relay), each key only while its feature is configured
+# (templates/secretproviderclass.yaml).
 secrets:
   provider: kubernetes
   csi:
@@ -178,7 +180,8 @@ parser:
 # its transport: tls verifies the server against caSecret (key ca.crt) by
 # serverName (the URL host by default), mtls also presents the workload
 # certificate, development is plaintext http:// (development.enabled).
-# Server-side TLS of Inference is P0.6.
+# Inference serves HTTPS with its own listener certificate (P0.6) and
+# authenticates no client.
 inference:
   url: ""
   tls:
@@ -206,8 +209,9 @@ qdrant:
 
 # P17: the PostgresStore projection's own database identity
 # (ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL) from an existing Secret. Without it
-# the memory projection is not configured. An environment variable is read at
-# start: rotating it rolls the Pods (the app-role URL file reloads in place).
+# the memory projection is not configured. Under secrets.provider kubernetes
+# it is an environment variable read at start: rotating it rolls the Pods
+# (the app-role URL file and the csi file reload in place).
 store:
   # Under secrets.provider csi: whether the projection is configured (its
   # URL is the store-database-url key); under kubernetes store.secret.name.

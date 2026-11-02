@@ -1,7 +1,7 @@
 // The assembled service on a real database: gRPC health and validation,
 // secret rotation with the pool replaced and drained, a rejected candidate
-// leaving the active generation, the ordered shutdown, and a failed start
-// that unwinds its listeners.
+// leaving the active generation, the ordered shutdown, a failed start that
+// unwinds its listeners, and the expiry of the active Apollo snapshot (F08).
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";

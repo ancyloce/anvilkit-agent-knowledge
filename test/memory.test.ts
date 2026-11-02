@@ -1,8 +1,8 @@
 // P17-03: MemoryFact proposals and decisions on a real PostgreSQL 17 —
 // models and workers only propose, decisions are a user's under the
 // expected revision, provenance is checked against the current ACL, and the
-// fact, its decision, its event and its projection requests commit or roll
-// back together.
+// fact, its decision and its projection requests (with their
+// background.requested events) commit or roll back together.
 import { Registry } from "prom-client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MemoryObjects } from "../src/adapters/objects.js";

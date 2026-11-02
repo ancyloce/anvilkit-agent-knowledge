@@ -97,8 +97,9 @@ func Build(ctx context.Context, gen Generation, metrics *Metrics) (rt *Runtime, 
 	if err = pool.Ping(probe); err != nil {
 		return nil, fmt.Errorf("database probe: %w", err)
 	}
-	// The identity's privileges are part of the probe: messages readable,
-	// offsets writable, the domain tables out of reach.
+	// The probe also reads the messages under the identity's own
+	// privileges; its offset writes and the domain tables out of its reach
+	// are the role's grants (TestNodeRowsForwardedToJetStream).
 	if _, err = pool.Exec(probe, `SELECT 1 FROM outbox LIMIT 1`); err != nil {
 		return nil, fmt.Errorf("outbox read probe: %w", err)
 	}
@@ -330,8 +331,7 @@ func natsCredentials(c Config) (nats.Option, error) {
 // the URL's host), plus the workload certificate under mtls. The files are
 // read at connect time; a rotation takes effect on the next connection
 // (NATS reconnects re-run GetClientCertificate; the roots are the bundle
-// read here, so a CA change needs a restart, recorded for P0.6 together
-// with the server side).
+// read here, so a CA change needs a restart).
 func natsTLS(c Config) (*tls.Config, error) {
 	caPEM, err := os.ReadFile(c.NATSTLSCAFile)
 	if err != nil {

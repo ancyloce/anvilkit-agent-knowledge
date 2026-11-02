@@ -259,7 +259,7 @@ export interface MemoryPayload {
 export const projectionResultRefOf = (factId: string, revision: number, target: number): string =>
 	`memory:${target}:${memoryKeyOf(factId, revision)}`;
 
-/** What one verified application states: the target, the fact revision, the action and the content digest. */
+/** What one verified application states: target, fact revision, action, content digest and model revision. */
 export function projectionDigest(p: {
 	factId: string;
 	revision: number;

@@ -211,7 +211,7 @@ export function readable(s: Pick<Source, "tenantId" | "projectId" | "deleted" | 
 	return s.access.some((e) => held.has(`${e.principalType}:${e.principalId}`));
 }
 
-/** Whether a replacement removes a principal that could read before (a revocation event follows). */
+/** Whether a replacement removes a principal that could read before (a revocation the removal inventory records). */
 export function revokes(before: AccessEntry[], after: AccessEntry[]): boolean {
 	const keep = new Set(after.map((e) => `${e.principalType}:${e.principalId}`));
 	return before.some((e) => !keep.has(`${e.principalType}:${e.principalId}`));

@@ -1,9 +1,10 @@
 // The removal inventory (P23, contracts.md §3, platform.md §6): Knowledge's
-// immutable record of every memory deletion and revocation, kept outside
-// the business database in the independent DR store (its own bucket, user
-// and bucket-limited policy). A point-in-time restore of anvilkit_knowledge
-// cannot erase a record, so the removals a restore lost are found again
-// here and re-applied before memory serves. Records are created only when
+// immutable record of every memory deletion and revocation and (P2.7) every
+// source deletion and ACL revocation, kept outside the business database in
+// the independent DR store (its own bucket, user and bucket-limited policy).
+// A point-in-time restore of anvilkit_knowledge cannot erase a record, so
+// the removals a restore lost are found again here and re-applied before
+// memory and source reads serve. Records are created only when
 // absent and never changed or deleted; a key that exists already must hold
 // the same bytes. A listing is complete or it fails: a truncated page
 // without a continuation token is an error, never an empty remainder.

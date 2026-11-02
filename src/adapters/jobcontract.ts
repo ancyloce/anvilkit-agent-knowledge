@@ -83,9 +83,9 @@ export function admitParserProfile(p: ParserProfile, development: boolean): Pars
 	return p;
 }
 
-/** Strict JSON: duplicate keys and non-finite numbers are refused before validation. */
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 
+/** Strict JSON: duplicate keys and non-finite numbers are refused before validation. */
 export function strictJson(bytes: Buffer): unknown {
 	let text: string;
 	try {

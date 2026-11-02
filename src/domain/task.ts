@@ -428,8 +428,9 @@ export function decideSubmit(
 	if (!digestPattern.test(sub.resultDigest))
 		throw new TaskError("INVALID_ARGUMENT", "a succeeded result carries its digest");
 	// Profiles whose result cannot be recomputed from the input (the parser's
-	// output) are compared with the owner's verified record of this attempt;
-	// without one the submission cannot match.
+	// output, an index manifest, a projection's application) are compared
+	// with the owner's verified record of this attempt; without one the
+	// submission cannot match.
 	const expected = t.resultProfile === localCheckProfile ? expectedResult(t) : recorded;
 	if (!expected || sub.resultRef !== expected.ref || sub.resultDigest !== expected.digest)
 		return failAttempt(t, failure.profileMismatch, now, bounds);

@@ -76,11 +76,6 @@ export interface Runtime {
 }
 
 /**
- * Constructs and probes the pool of a generation and builds its object
- * store, Kubernetes client and reviewed parser profile; any failure closes
- * what was built and rejects the generation.
- */
-/**
  * P2.7: every accepted parse result is readable by the indexer and
  * retrieval (index.max_result_bytes at least the parser profile's
  * maxOutputBytes), or one revision would fail forever at its size.
@@ -92,6 +87,12 @@ export function checkResultBound(maxResultBytes: number, parser: ParserProfile |
 		);
 }
 
+/**
+ * Constructs and probes the pool of a generation and builds its clients
+ * (object store, Kubernetes, reviewed parser profile, Inference, Qdrant,
+ * Store, removal inventory, cleanup pool); any failure closes what was built
+ * and rejects the generation.
+ */
 export async function buildRuntime(gen: Generation, previous?: Runtime): Promise<Runtime> {
 	const c = gen.config;
 	// The identity watcher outlives generations: the files are placements
@@ -110,8 +111,6 @@ export async function buildRuntime(gen: Generation, previous?: Runtime): Promise
 	let kube: Kube | undefined;
 	try {
 		parser = c.parser.profile ? admitParserProfile(parserProfile(c.parser.profile), c.development.enabled) : undefined;
-		// P2.7: every accepted parse result is readable by the indexer and
-		// retrieval, or one revision fails forever at its size.
 		checkResultBound(c.index.maxResultBytes, parser);
 		kube = c.parser.profile ? new KubeClient(loadKubeConfig(c.parser.kubeconfig), c.parser.kubeTimeoutMs) : undefined;
 	} catch (err) {

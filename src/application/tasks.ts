@@ -1,6 +1,7 @@
 // The owner's background-task commands (DD-09 §1), one transaction each:
 // the domain decision under the row lock of the generation, the attempt
-// record, the CAS update and the outbox event on the same client. No
+// record, the CAS update and, for a new generation, its
+// background.requested outbox event on the same client. No
 // network, queue or NATS I/O happens while a row is locked; the
 // original-dispatch query of an external-effect lease runs before the
 // transaction that consumes its answer.
@@ -56,7 +57,8 @@ export interface RequestInput {
 
 /**
  * The owner's record of a result profile whose expected result is not a
- * function of the input (the parser's verified output): prepare runs before
+ * function of the input (the parser's verified output, an index manifest, a
+ * projection's application): prepare runs before
  * the submitting transaction without locks; onAccepted and onEnded run
  * inside the transaction that accepts or ends the generation.
  */
@@ -74,7 +76,7 @@ export interface PreparedResult {
 export class Tasks {
 	private bounds: Bounds;
 	private records = new Map<string, ResultRecords>();
-	/** Registers the result records of one task kind (knowledge-ingest). */
+	/** Registers the result records of one task kind (main.ts registers every kind but local-check). */
 	setRecords(kind: Task["kind"], records: ResultRecords): void {
 		this.records.set(kind, records);
 	}

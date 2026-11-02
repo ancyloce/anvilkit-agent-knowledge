@@ -20,7 +20,7 @@ COPY src ./src
 RUN pnpm run build
 # The runtime dependencies alone, installed in a directory of their own: a
 # --prod install over the full one above removes nothing, and the image
-# shipped every development package (vite, vitest, typescript, biome).
+# would ship every development package (vite, vitest, typescript, biome).
 WORKDIR /prod
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --ignore-scripts --prod

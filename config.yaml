@@ -2,21 +2,23 @@
 # secret-free, placement-free part of a configuration generation. Precedence
 # is defaults < this file < a validated Apollo snapshot (non-secret keys,
 # ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE with apollo.mode: snapshot) < the
-# allowlisted environment: ANVILKIT_KNOWLEDGE_LISTEN,
-# ANVILKIT_KNOWLEDGE_HEALTH_LISTEN, ANVILKIT_KNOWLEDGE_IDENTITY_{CERT,KEY,CA}_FILE,
+# allowlisted environment (envOverrides in src/config.ts):
+# ANVILKIT_KNOWLEDGE_LISTEN, ANVILKIT_KNOWLEDGE_HEALTH_LISTEN,
+# ANVILKIT_KNOWLEDGE_IDENTITY_{CERT,KEY,CA}_FILE,
 # ANVILKIT_KNOWLEDGE_IDENTITY_TRUST_DOMAIN, ANVILKIT_KNOWLEDGE_DATABASE_URL or
 # ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE (the secret, environment or mounted
 # file only), ANVILKIT_KNOWLEDGE_CONTROL_ADDRESS,
+# ANVILKIT_KNOWLEDGE_TELEMETRY_OTLP_ENDPOINT,
 # ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE and the placements named in the
 # sections below. Any other ANVILKIT_KNOWLEDGE_*
 # variable, any unknown key here and any secret or placement key here
 # rejects the candidate before anything starts.
 #
-# P14 scope: the BackgroundTaskService owner (claims, heartbeats, result
-# acceptance, lease sweep, cancellation) and the transactional outbox; the
-# Go forwarder sidecar (forwarder/) reads it. Sources, ingestion, retrieval
-# and MemoryFact arrive with P15-P17. DEVELOPMENT_ONLY bounds below are not
-# production capacity.
+# The BackgroundTaskService owner (claims, heartbeats, result acceptance,
+# lease sweep, cancellation) and the transactional outbox (P14); the Go
+# forwarder sidecar (forwarder/) reads it. Sources, ingestion, retrieval and
+# MemoryFact are configured in the sections below. DEVELOPMENT_ONLY bounds
+# below are not production capacity.
 # development: the top-level DEVELOPMENT_ONLY guard (P0.1). This checked-in
 # file configures host-side runs on the development foundation
 # (deploy/dev), whose Inference and OTLP endpoints are plaintext; every
@@ -100,7 +102,8 @@ inference:
   # tls: the Inference transport; development is the foundation's plaintext
   # http:// (DEVELOPMENT_ONLY, needs development.enabled), tls verifies the
   # server against ca_file by server_name, mtls also presents the workload
-  # certificate (server-side TLS of Inference is P0.6).
+  # certificate (Inference serves HTTPS with its own listener certificate,
+  # P0.6, and authenticates no client).
   tls:
     mode: development
   timeout: 30s
@@ -199,13 +202,15 @@ memory:
   max_projection_epochs: 5
   retry_delay: 30s
 # P23: the removal inventory (contracts.md §3, platform.md §6). Every memory
-# deletion and revocation is answered only once its immutable record is in
+# deletion and revocation, and (P2.7) every source deletion and ACL
+# revocation, is answered only once its immutable record is in
 # this bucket of the independent DR store (its own user and bucket-limited
 # policy, never the objects bucket); after a restore of anvilkit_knowledge,
-# memory serves again only once every record past the database's newest
-# removal (less window_margin, the commit-order and clock margin) is
-# re-applied. The endpoint and the credentials file are environment-only
-# (ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT, ANVILKIT_KNOWLEDGE_REMOVALS_CREDENTIALS_FILE);
+# memory and source reads serve again only once every record past the
+# database's newest removal (less window_margin, the commit-order and clock
+# margin) is re-applied. The endpoint and the credentials file are
+# environment-only (ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT,
+# ANVILKIT_KNOWLEDGE_REMOVALS_CREDENTIALS_FILE);
 # unplaced, removals are not preserved across a restore and the service
 # warns. DEVELOPMENT_ONLY bounds.
 removals:

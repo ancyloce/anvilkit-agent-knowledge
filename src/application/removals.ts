@@ -12,7 +12,8 @@
 // re-applies every record without a row under its original command
 // identity. Until one pass has listed that window completely, memory is
 // closed: no fact is read, decided, recalled or projected, so nothing the
-// restore revived can be disclosed or written to a projection. A failed or
+// restore revived can be disclosed or written to a projection; source
+// reads, snapshots and searches are closed as well (P2.7). A failed or
 // truncated listing never counts as an empty one. A database watermark
 // that moves back (a restore under a running process) closes memory again.
 
@@ -43,7 +44,7 @@ export interface RemovalBounds {
 	pendingGraceMs?: number;
 }
 
-/** What re-applying one record did (the Memory use case owns the decision). */
+/** What re-applying one record did (the Memory or Sources use case owns the decision). */
 export type RestoreOutcome = "restored" | "held" | "absent" | "known";
 
 export interface RestoreTarget {
@@ -89,7 +90,7 @@ export class Removals {
 		this.sourceTarget = t;
 	}
 
-	/** Whether memory may serve: no inventory is placed, or a pass completed since the last restore. */
+	/** Whether memory and sources may serve: no inventory is placed, or a pass completed since the last restore. */
 	ready(): boolean {
 		return this.inventory() === undefined || this.reconciled;
 	}

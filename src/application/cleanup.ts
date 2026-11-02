@@ -38,7 +38,7 @@ export interface PurgeStatus {
 	purgedAt: Date | null;
 }
 
-/** The reconciler's lock key (one replica runs index, removal, memory, purge and retention passes). */
+/** The reconciler's lock key (one replica runs the index, purge, retention and memory passes; removal runs on each). */
 export const reconcilerLock = 0x6b6e6f776c656467n; // "knowledg"
 
 /**

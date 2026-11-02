@@ -440,7 +440,7 @@ export class Memory {
 	/**
 	 * The reviewed expiry rule (memory-expiry-v1): a confirmed fact whose
 	 * expiry passed becomes expired in its own transaction, as a policy
-	 * decision recorded with the rule's revision, its event and the
+	 * decision recorded with the rule's revision, together with the
 	 * tombstone requests of every target. Recall already hides it from the
 	 * moment its expiry passes; this makes the state and projections follow.
 	 */

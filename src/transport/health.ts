@@ -1,8 +1,9 @@
 // The plaintext probe and metrics listener: /healthz answers 200 while the
-// process runs, /readyz 200 only while the gRPC listener serves, the schema
-// is at or above the binary's minimum and no shutdown has started, /metrics
-// the Prometheus exposition. First up, last down, so a scrape during the
-// drain still sees the shutdown gauges.
+// process runs, /readyz 200 only while the gRPC listener serves, the active
+// configuration has not expired, the database answers (DependencyProbe),
+// the schema is at or above the binary's minimum and no shutdown has
+// started, /metrics the Prometheus exposition. First up, last down, so a
+// scrape during the drain still sees the shutdown gauges.
 import { createServer, type Server } from "node:http";
 import type { Registry } from "prom-client";
 import type { Logger } from "../log.js";

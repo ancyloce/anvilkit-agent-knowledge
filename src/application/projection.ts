@@ -356,7 +356,8 @@ export class MemoryProjector implements ResultRecords {
 	}
 
 	// ---------------------------------------------------------------------
-	// Reconciliation: backfill and retry (P17-04); expiry and rebuild (P17-06)
+	// Reconciliation: backfill and retry (P17-04); rebuild (P17-06; expiry is
+	// Memory.expireDue); the generation gate of the Index Builder
 	// ---------------------------------------------------------------------
 
 	/** The open generations of a placed space (the active or the retained one) whose collections exist (memory points go there). */

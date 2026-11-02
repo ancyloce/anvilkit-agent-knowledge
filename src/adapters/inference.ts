@@ -97,8 +97,8 @@ export function embedderFor(g: VectorSpace, placements: (Placement | undefined)[
  * server against the CA bundle with standard hostname verification by
  * serverName (the URL host by default); mtls additionally presents the
  * workload certificate. The bundle and identity are read per connection,
- * so a rotation is in force for the next request. Server-side TLS of
- * Inference itself is P0.6.
+ * so a rotation is in force for the next request. Inference serves HTTPS
+ * with its own listener certificate (P0.6) and authenticates no client.
  */
 export type InferenceTransport =
 	| { mode: "development" }

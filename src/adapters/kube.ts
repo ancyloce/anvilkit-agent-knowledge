@@ -1,9 +1,10 @@
 // The parser launcher's Kubernetes access (DD-07 §2, platform.md
-// anvilkit-parsing): Jobs, their Pods and the per-launch stage Secret in one
-// namespace, through the least Role the Knowledge chart grants. Every call
-// is exactly one HTTPS request: no client retries, no redirects followed, so
-// a lost answer is resolved by reading the deterministic name again, never
-// by a blind second create. Deletion is bound to the observed UID.
+// anvilkit-parsing): Jobs and the per-launch stage Secret in one namespace
+// (never their Pods), through the least Role the Knowledge chart grants.
+// Every call is exactly one HTTPS request: no client retries, no redirects
+// followed, so a lost answer is resolved by reading the deterministic name
+// again, never by a blind second create. Deletion is bound to the observed
+// UID.
 import { readFileSync } from "node:fs";
 import https from "node:https";
 import { parse as parseYaml } from "yaml";

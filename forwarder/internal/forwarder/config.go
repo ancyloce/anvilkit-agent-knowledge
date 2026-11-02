@@ -45,8 +45,8 @@ type Config struct {
 	// NATSTLSMode is development (plaintext, guarded), tls (verify the
 	// server against NATSTLSCAFile) or mtls (additionally present the
 	// workload certificate). NATSTLSServerName, when set, is the name the
-	// server certificate is verified against (else the URL's host).
-	// Server-side TLS of the JetStream is P0.6.
+	// server certificate is verified against (else the URL's host). The
+	// JetStream server's own TLS is the deployment's (P0.6).
 	NATSTLSMode       string
 	NATSTLSCAFile     string
 	NATSTLSCertFile   string
@@ -75,7 +75,7 @@ type Generation struct {
 	SecretRevision string
 }
 
-// Inputs identify what a change of produces a new generation.
+// Inputs identifies the inputs whose change produces a new generation.
 func (g Generation) Inputs() string { return g.Digest + "/" + g.SecretRevision }
 
 // Load builds a generation from the environment.
@@ -139,7 +139,7 @@ func Load(environ []string, number uint64) (Generation, error) {
 	}
 	// Outside development the TLS rules above already exclude the plaintext
 	// mode; the connection also authenticates. Under the guard a placed
-	// credential is still presented, none is admitted.
+	// credential is still presented and a missing one is admitted.
 	natsCreds := ""
 	if c.NATSCredsFile != "" {
 		kind, revision, err := readNATSCredentials(c.NATSCredsFile)

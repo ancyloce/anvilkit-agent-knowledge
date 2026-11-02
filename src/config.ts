@@ -4,10 +4,11 @@
 // the parent describes the file) < the allowlisted ANVILKIT_KNOWLEDGE_*
 // environment. A candidate is validated as a whole and becomes a complete
 // generation or is rejected; nothing starts on a rejected candidate and no
-// shared value is mutated field by field. The secrets (the database and
-// Store URLs, the Qdrant key, the object-store credentials) arrive from the
-// environment or from mounted secret files (P0.6: the CSI-delivered form)
-// whose rotation produces a new generation; they are never accepted from the
+// shared value is mutated field by field. The secrets (secretKeys below:
+// the database, Store and cleanup URLs, the Qdrant key, the object-store and
+// removal-store credentials) arrive from the environment or from mounted
+// secret files (P0.6: the CSI-delivered form) whose rotation produces a new
+// generation; they are never accepted from the
 // file or the snapshot and never logged. Outside development (P0.6) every
 // PostgreSQL URL verifies the server (sslmode=verify-full) and the object
 // stores and Qdrant are https://.

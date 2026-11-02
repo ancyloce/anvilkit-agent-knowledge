@@ -1,7 +1,8 @@
 // Knowledge's spans (security.md "data classification, logging and
-// deletion"): one server span per RPC named after the RPC, with the gRPC
-// status code only. A source body, retrieved text, a memory fact, a tenant,
-// a principal or any request field never becomes a span attribute. The
+// deletion"): one server span per RPC named after the RPC, with its method,
+// its gRPC status code and the API's opaque request identifier only. A
+// source body, retrieved text, a memory fact, a tenant, a principal or any
+// request field never becomes a span attribute. The
 // callers' trace context (API, Background Worker, Control-side callers)
 // continues through the traceparent metadata. Spans go over OTLP/HTTP to the
 // collector when an endpoint is placed and nowhere otherwise.

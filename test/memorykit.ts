@@ -173,7 +173,7 @@ export async function startKit(): Promise<Kit> {
 	};
 }
 
-/** Two reconciliation passes: the empty generation of the space is created, materialized and accepted. */
+/** Four reconciliation passes: the empty generation of the space is created, materialized and accepted. */
 export async function acceptGeneration(k: Kit): Promise<void> {
 	for (let i = 0; i < 4; i++) await k.indexer.reconcile();
 }
