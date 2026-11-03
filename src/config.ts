@@ -715,6 +715,7 @@ export function loadFrom(path: string, environ: NodeJS.ProcessEnv, number: numbe
 				`kubeconfig=${cfg.parser.kubeconfig ? fileDigest(cfg.parser.kubeconfig) : ""}`,
 				`qdrant=${cfg.qdrant.apiKey}`,
 				`store=${cfg.store.url}`,
+				`cleanup=${cfg.cleanup.url}`,
 				`removals=${cfg.removals.accessKeyId}:${cfg.removals.secretAccessKey}`,
 			].join("\n"),
 		),

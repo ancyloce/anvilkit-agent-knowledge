@@ -464,3 +464,21 @@ describe("shared snapshot fixtures", () => {
 		}
 	});
 });
+
+describe("cleanup identity rotation", () => {
+	it("makes a rotated cleanup URL alone a new secret revision, never part of the inputs' text", () => {
+		const dir = mkdtempSync(path.join(tmpdir(), "knowledge-config-"));
+		const cleanupFile = path.join(dir, "cleanup-url");
+		writeFileSync(cleanupFile, "postgres://cleanup:one@db:5432/anvilkit_knowledge?sslmode=verify-full\n");
+		const file = write("{}\n");
+		const env = { ...base, ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL_FILE: cleanupFile };
+		const g1 = loadFrom(file, env, 1);
+		expect(g1.config.cleanup.url).toBe("postgres://cleanup:one@db:5432/anvilkit_knowledge?sslmode=verify-full");
+		writeFileSync(cleanupFile, "postgres://cleanup:two@db:5432/anvilkit_knowledge?sslmode=verify-full\n");
+		const g2 = loadFrom(file, env, 2);
+		expect(g2.digest).toBe(g1.digest);
+		expect(g2.secretRevision).not.toBe(g1.secretRevision);
+		expect(inputsOf(g2)).not.toBe(inputsOf(g1));
+		for (const g of [g1, g2]) expect(inputsOf(g)).not.toMatch(/cleanup:|one@|two@/);
+	});
+});

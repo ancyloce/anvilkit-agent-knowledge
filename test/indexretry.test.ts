@@ -134,6 +134,37 @@ describe("index resilience (P2.7)", () => {
 		expect(e.rows[0]).toMatchObject({ state: "quarantined", attempts: 2, failure_code: "CHUNK_UNVERIFIED" });
 	});
 
+	it("a task end reported after the quarantine leaves the entry quarantined, never failed and retried again", async () => {
+		const taskId = await schedule("src-lost", ["gone one", "gone two"]);
+		const ref = await inst.admin("SELECT content_ref FROM chunks WHERE source_id = 'src-lost' LIMIT 1");
+		objects.objects.delete(String(ref.rows[0]?.content_ref).split("#")[0] as string);
+		const g = {
+			generation: 1,
+			chunkerProfile: "docling-hierarchical",
+			chunkerRevision: 1,
+			embeddingProfile: space.embeddingProfile,
+			modelRevision: space.modelRevision,
+		} as Parameters<Indexer["retryFailed"]>[0];
+		expect(await drive(taskId, 1)).toEqual({ state: "failed", failureCode: "CHUNK_UNVERIFIED" });
+		clock.advance(1_000);
+		await indexer.retryFailed(g);
+		expect(await drive(taskId, 2)).toEqual({ state: "failed", failureCode: "CHUNK_UNVERIFIED" });
+		clock.advance(1_000);
+		await indexer.retryFailed(g);
+		const state = async () =>
+			(await inst.admin("SELECT state, attempts FROM index_entries WHERE task_id = $1", [taskId])).rows[0];
+		expect(await state()).toMatchObject({ state: "quarantined", attempts: 2 });
+		// The second attempt's task ends after the quarantine (as Tasks.apply
+		// reports a terminal row): the entry stays settled.
+		const latest = await tasks.get(taskId);
+		expect(latest.generation).toBe(2);
+		await store.inTx((c) => indexer.onEnded(c, { ...latest, state: "dead", failureCode: "CHUNK_UNVERIFIED" }));
+		expect(await state()).toMatchObject({ state: "quarantined", attempts: 2 });
+		clock.advance(1_000);
+		await indexer.retryFailed(g);
+		expect(await state()).toMatchObject({ state: "quarantined", attempts: 2 });
+	});
+
 	it("quarantined revisions settle a generation; open or failed ones still hold it", () => {
 		expect(
 			qualifies({ eligible: 3, accepted: 2, quarantined: 1, open: 0, expectedPoints: 5, countedPoints: 5 }),

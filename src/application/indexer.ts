@@ -217,7 +217,7 @@ export class Indexer implements ResultRecords {
 				resultRef: indexResultRefOf(entry.generation, entry.sourceId, entry.sourceRevision),
 				resultDigest: entry.manifestDigest,
 			};
-		if (entry.state === "failed" || entry.state === "stale")
+		if (entry.state === "failed" || entry.state === "stale" || entry.state === "quarantined")
 			return { state: "failed", failureCode: entry.failureCode || indexFailure.unavailable };
 		const vectors = this.vectors();
 		const inference = this.inference();
@@ -411,7 +411,8 @@ export class Indexer implements ResultRecords {
 
 	async onEnded(c: db.PoolClient, task: Task): Promise<void> {
 		const entry = await idx.getEntryByTask(c, task.taskId, true);
-		if (!entry || entry.state === "accepted" || entry.state === "stale") return;
+		// Settled entries stay: a quarantined one marked failed again would be retried past index.max_attempts.
+		if (!entry || entry.state === "accepted" || entry.state === "stale" || entry.state === "quarantined") return;
 		// P2.7: a generation a retry superseded no longer owns the entry (the
 		// retry reset it in the same transaction and its next generation does).
 		if (task.state === "stale" && task.failureCode === "SUPERSEDED") return;

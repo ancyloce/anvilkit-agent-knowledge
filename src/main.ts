@@ -4,7 +4,7 @@
 // generation watcher; a failed start unwinds what it created. SIGTERM
 // withdraws readiness and new admission, drains the server within its
 // bound (forced stop afterwards), stops the loops, records the drain and
-// closes the generation's pool last, with the probe listener after it.
+// drains the generation's pools last (retire), then the probe listener.
 import { type ChannelCredentials, type ChannelOptions, credentials } from "@grpc/grpc-js";
 import { collectDefaultMetrics, Registry } from "prom-client";
 import { ControlDisclosure, ControlDispatchQuery } from "./adapters/control.js";
@@ -413,7 +413,7 @@ export async function start(
 		database.stop();
 		schema.stop();
 		health.close();
-		await retire(rt, cfg.reload.drainLimitMs);
+		await retire(rt, cfg.reload.drainLimitMs, log);
 		if (dispatch instanceof ControlDispatchQuery) dispatch.close();
 		throw err;
 	}

@@ -132,10 +132,6 @@ export function visible(
 	return true;
 }
 
-/** Only these facts are projected with content and recalled. */
-export const recallable = (f: Pick<Fact, "state" | "deleted" | "expiresAt">, now: Date): boolean =>
-	f.state === "confirmed" && !f.deleted && (f.expiresAt === null || f.expiresAt.getTime() > now.getTime());
-
 /** The state a decision leads to from the current one; revoked, rejected and expired facts never come back. */
 export function transition(from: FactState, d: Decision): FactState {
 	if (from === "proposed" && d === "confirm") return "confirmed";

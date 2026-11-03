@@ -235,16 +235,6 @@ export class Sources {
 
 		const requestId = ingestRequestIdOf(sourceId, 1);
 		const taskId = ingestTaskIdOf(sourceId, 1);
-		const input: IngestInput = {
-			schemaVersion: 1,
-			computation: ingestProfile,
-			sourceId,
-			sourceRevision: 1,
-			ingestRequestId: requestId,
-			parserProfile: plan.profileId,
-			parserProfileRevision: plan.profileRevision,
-			input: { digest: req.contentDigest, sizeBytes: String(bytes.length), mediaType },
-		};
 		try {
 			await this.store.inTx(async (c) => {
 				if (await idb.getCommand(c, cmd.tenantId, cmd.commandId))
@@ -274,31 +264,13 @@ export class Sources {
 					requestDigest: cmd.requestDigest,
 					sourceId,
 				});
-				await idb.insertIngestRequest(c, {
+				await this.requestIngestIn(c, plan, {
 					requestId,
-					sourceId,
-					sourceRevision: 1,
-					state: "pending",
-					parserProfile: plan.profileId,
-					parserProfileRevision: plan.profileRevision,
-					chunkerProfile: plan.chunkerId,
-					chunkerRevision: plan.chunkerRevision,
-					taskId,
-					failureCode: "",
-					pageCount: null,
-					chunkCount: null,
-					resultRef: "",
-					resultDigest: "",
-				});
-				await this.tasks.requestIn(c, {
 					taskId,
 					tenantId: scope.tenantId,
-					kind: "knowledge-ingest",
-					profile: ingestProfile,
-					input: JSON.stringify(input),
-					effects: "reconstructible",
-					dispatchId: "",
-					authorizationRef: `source:${sourceId}`,
+					sourceId,
+					sourceRevision: 1,
+					content: { digest: req.contentDigest, sizeBytes: String(bytes.length), mediaType },
 					correlationId: cmd.commandId,
 				});
 			});
@@ -403,6 +375,63 @@ export class Sources {
 	}
 
 	/**
+	 * Records one ingest request of a source revision under the plan and
+	 * requests its knowledge-ingest task, inside the caller's transaction (a
+	 * registration's or a re-ingest's); the task is authorized by the source.
+	 */
+	private async requestIngestIn(
+		c: db.PoolClient,
+		plan: IngestPlan,
+		r: {
+			requestId: string;
+			taskId: string;
+			tenantId: string;
+			sourceId: string;
+			sourceRevision: number;
+			content: IngestInput["input"];
+			correlationId: string;
+		},
+	): Promise<void> {
+		const input: IngestInput = {
+			schemaVersion: 1,
+			computation: ingestProfile,
+			sourceId: r.sourceId,
+			sourceRevision: r.sourceRevision,
+			ingestRequestId: r.requestId,
+			parserProfile: plan.profileId,
+			parserProfileRevision: plan.profileRevision,
+			input: r.content,
+		};
+		await idb.insertIngestRequest(c, {
+			requestId: r.requestId,
+			sourceId: r.sourceId,
+			sourceRevision: r.sourceRevision,
+			state: "pending",
+			parserProfile: plan.profileId,
+			parserProfileRevision: plan.profileRevision,
+			chunkerProfile: plan.chunkerId,
+			chunkerRevision: plan.chunkerRevision,
+			taskId: r.taskId,
+			failureCode: "",
+			pageCount: null,
+			chunkCount: null,
+			resultRef: "",
+			resultDigest: "",
+		});
+		await this.tasks.requestIn(c, {
+			taskId: r.taskId,
+			tenantId: r.tenantId,
+			kind: "knowledge-ingest",
+			profile: ingestProfile,
+			input: JSON.stringify(input),
+			effects: "reconstructible",
+			dispatchId: "",
+			authorizationRef: `source:${r.sourceId}`,
+			correlationId: r.correlationId,
+		});
+	}
+
+	/**
 	 * P2.7: the re-ingest of a parser or chunker change: every live current
 	 * revision indexed under another chunker is parsed again under the
 	 * current plan (its own ingest request and knowledge-ingest task, the
@@ -427,46 +456,18 @@ export class Sources {
 			const suffix = `p${plan.profileRevision}-c${plan.chunkerRevision}`;
 			const requestId = `${ingestRequestIdOf(r.sourceId, r.revision)}-${suffix}`;
 			const taskId = `${ingestTaskIdOf(r.sourceId, r.revision)}-${suffix}`;
-			const input: IngestInput = {
-				schemaVersion: 1,
-				computation: ingestProfile,
-				sourceId: r.sourceId,
-				sourceRevision: r.revision,
-				ingestRequestId: requestId,
-				parserProfile: plan.profileId,
-				parserProfileRevision: plan.profileRevision,
-				input: { digest: r.contentDigest, sizeBytes: String(r.sizeBytes), mediaType: r.mediaType as MediaType },
-			};
 			try {
-				await this.store.inTx(async (c) => {
-					await idb.insertIngestRequest(c, {
+				await this.store.inTx((c) =>
+					this.requestIngestIn(c, plan, {
 						requestId,
-						sourceId: r.sourceId,
-						sourceRevision: r.revision,
-						state: "pending",
-						parserProfile: plan.profileId,
-						parserProfileRevision: plan.profileRevision,
-						chunkerProfile: plan.chunkerId,
-						chunkerRevision: plan.chunkerRevision,
-						taskId,
-						failureCode: "",
-						pageCount: null,
-						chunkCount: null,
-						resultRef: "",
-						resultDigest: "",
-					});
-					await this.tasks.requestIn(c, {
 						taskId,
 						tenantId: r.tenantId,
-						kind: "knowledge-ingest",
-						profile: ingestProfile,
-						input: JSON.stringify(input),
-						effects: "reconstructible",
-						dispatchId: "",
-						authorizationRef: `source:${r.sourceId}`,
+						sourceId: r.sourceId,
+						sourceRevision: r.revision,
+						content: { digest: r.contentDigest, sizeBytes: String(r.sizeBytes), mediaType: r.mediaType as MediaType },
 						correlationId: `reparse-${suffix}`,
-					});
-				});
+					}),
+				);
 				n++;
 			} catch (err) {
 				// Another replica requested it first.

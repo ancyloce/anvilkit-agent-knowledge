@@ -1,10 +1,10 @@
 // Configuration generations at runtime (DD-09 §4): a candidate is loaded
 // from the same inputs as the first generation, its pool is constructed
 // off-path and probed, and only then does the swap make it the active
-// generation; the previous pool drains within the limit. A rejected
-// candidate leaves nothing behind and the active generation untouched. New
-// admissions read the active generation; requests and leases keep what
-// they froze.
+// generation; the previous generation's pools drain within one limit
+// (retire). A rejected candidate leaves nothing behind and the active
+// generation untouched. New admissions read the active generation;
+// requests and leases keep what they froze.
 import { readFileSync } from "node:fs";
 import type pg from "pg";
 import { InferenceClient, type InferenceTransport, type Placement } from "./adapters/inference.js";
@@ -238,22 +238,53 @@ export async function buildRuntime(gen: Generation, previous?: Runtime): Promise
 	return { gen, pool, identity, objects, kube, parser, inference, retained, vectors, memoryStore, removals, cleanup };
 }
 
-/** Drains the pool within the limit; reports whether the limit cut it short. */
-export async function retire(rt: Runtime, limitMs: number): Promise<boolean> {
-	let forced = false;
-	const bound = new Promise<void>((resolve) =>
-		setTimeout(() => {
-			forced = true;
-			resolve();
-		}, limitMs).unref(),
-	);
-	await Promise.race([rt.pool.end(), bound]);
+/**
+ * Drains a generation within one limit: the primary pool, the cleanup pool
+ * and the Store pool end concurrently under the same deadline, then the
+ * other clients close. Reports whether the deadline cut any drain short; the
+ * drains still pending at the deadline and every failed drain, a late one
+ * included, are logged by name (never a URL), and none rejects.
+ */
+export async function retire(rt: Runtime, limitMs: number, log?: Pick<Logger, "warn">): Promise<boolean> {
+	const pending = new Set<string>();
+	const drains: Promise<void>[] = [];
+	for (const [name, drain] of [
+		["database", () => rt.pool.end()],
+		["cleanup", rt.cleanup ? () => (rt.cleanup as pg.Pool).end() : undefined],
+		["store", rt.memoryStore ? () => (rt.memoryStore as MemoryStorePort).close() : undefined],
+	] as [string, (() => Promise<void>) | undefined][]) {
+		if (!drain) continue;
+		pending.add(name);
+		drains.push(
+			Promise.resolve()
+				.then(drain)
+				.then(
+					() => {
+						pending.delete(name);
+					},
+					(err) => {
+						pending.delete(name);
+						log?.warn("generation drain failed", {
+							resource: name,
+							error: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+						});
+					},
+				),
+		);
+	}
+	let timer: NodeJS.Timeout | undefined;
+	const deadline = new Promise<"deadline">((resolve) => {
+		timer = setTimeout(() => resolve("deadline"), limitMs);
+		timer.unref();
+	});
+	const outcome = await Promise.race([Promise.all(drains).then(() => "drained" as const), deadline]);
+	clearTimeout(timer);
+	const forced = outcome === "deadline" && pending.size > 0;
+	if (forced) log?.warn("generation drain cut short by the limit", { resources: [...pending].join(","), limitMs });
 	rt.objects?.close();
 	rt.kube?.close();
 	rt.vectors?.close();
 	rt.removals?.close();
-	await rt.cleanup?.end().catch(() => undefined);
-	await rt.memoryStore?.close().catch(() => undefined);
 	return forced;
 }
 
@@ -304,7 +335,7 @@ export class Generations {
 		});
 		if (!previous) return Promise.resolve();
 		const started = Date.now();
-		return retire(previous, rt.gen.config.reload.drainLimitMs).then((forced) =>
+		return retire(previous, rt.gen.config.reload.drainLimitMs, this.log).then((forced) =>
 			this.log.info("previous generation drained", {
 				generation: previous.gen.number,
 				seconds: (Date.now() - started) / 1000,
@@ -340,6 +371,6 @@ export class Generations {
 	async shutdown(limitMs: number): Promise<boolean> {
 		const rt = this.active;
 		this.active = null;
-		return rt ? retire(rt, limitMs) : false;
+		return rt ? retire(rt, limitMs, this.log) : false;
 	}
 }

@@ -7,6 +7,7 @@ import {
 	FactDecision,
 	FactOrigin,
 	FactState,
+	IndexState,
 	IngestState,
 	MemoryFact,
 	Snapshot,
@@ -14,6 +15,8 @@ import {
 	SourceKind,
 	TaskState,
 } from "@anvilkit/generated-clients/proto/anvilkit/knowledge/v1/knowledge";
+import type { IndexAnswer } from "../application/indexer.js";
+import type { ProjectionAnswer } from "../application/projection.js";
 import type { Fact } from "../domain/memory.js";
 import type { Snapshot as DomainSnapshot } from "../domain/retrieval.js";
 import * as domain from "../domain/source.js";
@@ -178,4 +181,26 @@ export function sequenceOf(v: string, what: string): number {
 export function generationOf(s: string): number {
 	if (!/^[1-9][0-9]{0,18}$/.test(s)) throw new TaskError("INVALID_ARGUMENT", `generation ${s}`);
 	return Number(s);
+}
+
+/** The fields of an index-shaped advance answer (AdvanceIndex, AdvanceProjection): its IndexState and what that state carries. */
+export function indexAnswerOf(a: IndexAnswer | ProjectionAnswer): {
+	state: IndexState;
+	resultRef: string;
+	resultDigest: string;
+	failureCode: string | undefined;
+	retryAfterMs: number;
+} {
+	return {
+		state:
+			a.state === "running"
+				? IndexState.INDEX_STATE_RUNNING
+				: a.state === "materialized"
+					? IndexState.INDEX_STATE_MATERIALIZED
+					: IndexState.INDEX_STATE_FAILED,
+		resultRef: a.state === "materialized" ? a.resultRef : "",
+		resultDigest: a.state === "materialized" ? a.resultDigest : "",
+		failureCode: a.state === "failed" ? a.failureCode : undefined,
+		retryAfterMs: a.state === "running" ? a.retryAfterMs : 0,
+	};
 }

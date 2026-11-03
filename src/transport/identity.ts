@@ -4,7 +4,7 @@
 // method→principal authorization that runs ahead of every handler. A
 // workload certificate identifies a service; it never establishes a user,
 // tenant, role or approver.
-import { createHash, createPrivateKey, constants as cryptoConstants, X509Certificate } from "node:crypto";
+import { createHash, createPrivateKey, X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
 	type ChannelCredentials,

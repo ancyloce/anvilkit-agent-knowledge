@@ -89,7 +89,8 @@ export function vectorsFit(
 	return got.modelRevision === g.modelRevision && got.dense.every((v) => v.length === g.dimensions);
 }
 
-export type EntryState = "pending" | "running" | "materialized" | "accepted" | "failed" | "stale";
+/** quarantined (P2.7): failed after index.max_attempts; settled without points until a document rebuild resets it. */
+export type EntryState = "pending" | "running" | "materialized" | "accepted" | "failed" | "stale" | "quarantined";
 
 /** The state of one source revision in one generation. */
 export interface IndexEntry {

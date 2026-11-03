@@ -46,7 +46,6 @@ import {
 	type GetTaskResponse,
 	HeartbeatTaskRequest,
 	type HeartbeatTaskResponse,
-	IndexState,
 	type IngestServiceServer,
 	IngestServiceService,
 	ListFactsRequest,
@@ -119,6 +118,7 @@ import {
 	factStateOf,
 	factToProto,
 	generationOf,
+	indexAnswerOf,
 	kindOf,
 	originOf,
 	sequenceOf,
@@ -472,19 +472,7 @@ export function createGrpcServer(
 				async (req): Promise<AdvanceProjectionResponse> => {
 					if (!projector) throw new MemoryError("UNAVAILABLE", "no memory projector in this build");
 					const a = await projector.advance(req.taskId, generationOf(req.generation), req.workerId, req.inputDigest);
-					return {
-						$type: "anvilkit.knowledge.v1.AdvanceProjectionResponse",
-						state:
-							a.state === "running"
-								? IndexState.INDEX_STATE_RUNNING
-								: a.state === "materialized"
-									? IndexState.INDEX_STATE_MATERIALIZED
-									: IndexState.INDEX_STATE_FAILED,
-						resultRef: a.state === "materialized" ? a.resultRef : "",
-						resultDigest: a.state === "materialized" ? a.resultDigest : "",
-						failureCode: a.state === "failed" ? a.failureCode : undefined,
-						retryAfterMs: a.state === "running" ? a.retryAfterMs : 0,
-					};
+					return { $type: "anvilkit.knowledge.v1.AdvanceProjectionResponse", ...indexAnswerOf(a) };
 				},
 			),
 			advanceParse: guard(
@@ -508,19 +496,7 @@ export function createGrpcServer(
 				async (req): Promise<AdvanceIndexResponse> => {
 					if (!indexer) throw new IndexError("UNAVAILABLE", "no index builder in this build");
 					const a = await indexer.advance(req.taskId, generationOf(req.generation), req.workerId, req.inputDigest);
-					return {
-						$type: "anvilkit.knowledge.v1.AdvanceIndexResponse",
-						state:
-							a.state === "running"
-								? IndexState.INDEX_STATE_RUNNING
-								: a.state === "materialized"
-									? IndexState.INDEX_STATE_MATERIALIZED
-									: IndexState.INDEX_STATE_FAILED,
-						resultRef: a.state === "materialized" ? a.resultRef : "",
-						resultDigest: a.state === "materialized" ? a.resultDigest : "",
-						failureCode: a.state === "failed" ? a.failureCode : undefined,
-						retryAfterMs: a.state === "running" ? a.retryAfterMs : 0,
-					};
+					return { $type: "anvilkit.knowledge.v1.AdvanceIndexResponse", ...indexAnswerOf(a) };
 				},
 			),
 		};
