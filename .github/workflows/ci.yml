@@ -59,16 +59,34 @@ jobs:
       - run: docker build --target forwarder -t anvilkit-knowledge-forwarder:ci .
   chart:
     runs-on: ubuntu-24.04
+    env:
+      # A production-shaped render (development.enabled false). RB-A04: outside
+      # development the chart requires the Control placement, the removal
+      # inventory and the cleanup identity.
+      CHART_SETS: >-
+        --set database.secret.name=knowledge-database --set nats.url=tls://nats:4222 --set nats.tls.caSecret.name=nats-ca --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer
+        --set forwarder.database.secret.name=knowledge-forwarder-database
+        --set relay.database.secret.name=knowledge-relay-database --set relay.queue.secret.name=queue-valkey --set nats.credentials.secret.name=knowledge-nats
+        --set control.address=anvilkit-agent-control:9101 --set removals.endpoint=https://dr.ci.example:9000 --set removals.credentials.secret.name=knowledge-removals --set cleanup.secret.name=knowledge-cleanup
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: "v3.19.0"
-      - run: >-
-          helm lint deploy/chart --set database.secret.name=knowledge-database --set nats.url=tls://nats:4222 --set nats.tls.caSecret.name=nats-ca --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer
-          --set forwarder.database.secret.name=knowledge-forwarder-database
-          --set relay.database.secret.name=knowledge-relay-database --set relay.queue.secret.name=queue-valkey --set nats.credentials.secret.name=knowledge-nats
-      - run: >-
-          helm template anvilkit-agent-knowledge deploy/chart --set database.secret.name=knowledge-database --set nats.url=tls://nats:4222 --set nats.tls.caSecret.name=nats-ca --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer
-          --set forwarder.database.secret.name=knowledge-forwarder-database
-          --set relay.database.secret.name=knowledge-relay-database --set relay.queue.secret.name=queue-valkey --set nats.credentials.secret.name=knowledge-nats > /dev/null
+      - run: helm lint deploy/chart $CHART_SETS
+      - run: helm template anvilkit-agent-knowledge deploy/chart $CHART_SETS > /dev/null
+      - name: Refuse a production render without Control, the removal inventory or the cleanup identity (RB-A04)
+        run: |
+          for unset in control.address removals.endpoint cleanup.secret.name; do
+            if out=$(helm template anvilkit-agent-knowledge deploy/chart $CHART_SETS --set "$unset=" 2>&1); then
+              echo "rendered without $unset"; exit 1
+            fi
+            echo "$out" | grep -q "required outside development" || { echo "$out"; exit 1; }
+          done
+          # The development guard keeps the unplaced foundation (DEVELOPMENT_ONLY).
+          helm template anvilkit-agent-knowledge deploy/chart $CHART_SETS --set control.address= --set removals.endpoint= --set cleanup.secret.name= --set development.enabled=true > /dev/null
+      - name: The parser launcher creates its stage Secret and reads no Secret (RB-A18)
+        run: |
+          role=$(helm template anvilkit-agent-knowledge deploy/chart $CHART_SETS --set parser.enabled=true --set parser.namespace=anvilkit-parsing -s templates/rbac.yaml)
+          [ "$(echo "$role" | grep -c 'resources: \["secrets"\]')" = 1 ] || { echo "$role"; exit 1; }
+          echo "$role" | grep -A1 'resources: \["secrets"\]' | grep -qx '    verbs: \["create"\]' || { echo "$role"; exit 1; }
