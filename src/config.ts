@@ -1102,6 +1102,27 @@ function validate(raw: Raw): Config {
 	if (cleanupUrl && !/^postgres(ql)?:\/\//.test(cleanupUrl)) errors.push("cleanup.url must be a postgres URL");
 	const cleanupTls = cleanupUrl && !development ? postgresTlsError("cleanup.url", cleanupUrl) : undefined;
 	if (cleanupTls) errors.push(cleanupTls);
+	// RB-A04: outside development the placements that keep disclosure and
+	// deletion closed are required. Without Control no disclosure is
+	// commercially authorized (requireDisclosure would admit every one),
+	// without the removal inventory deletions and revocations are not
+	// preserved across a database restore, and without the cleanup identity
+	// deleted sources are never erased.
+	const controlAddress = attempt(() => str(raw, "control.address"), "");
+	if (!development) {
+		if (!controlAddress)
+			errors.push(
+				"control.address is required outside development (ANVILKIT_KNOWLEDGE_CONTROL_ADDRESS): without Control no disclosure is commercially authorized; an unplaced Control needs development.enabled: true (DEVELOPMENT_ONLY)",
+			);
+		if (!removalsEndpoint)
+			errors.push(
+				"removals.endpoint is required outside development (ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT): without the removal inventory deletions and revocations are not preserved across a database restore; an unplaced inventory needs development.enabled: true (DEVELOPMENT_ONLY)",
+			);
+		if (!cleanupUrl && !get(raw, "cleanup.url_file"))
+			errors.push(
+				"cleanup.url is required outside development (ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL or ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL_FILE): without the cleanup identity deleted sources are never erased; an unplaced cleanup identity needs development.enabled: true (DEVELOPMENT_ONLY)",
+			);
+	}
 	const minScoreText = attempt(() => str(raw, "retrieval.min_rerank_score"), "0");
 	const minScore = Number(minScoreText);
 	if (!/^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(minScoreText) || !Number.isFinite(minScore))
@@ -1142,7 +1163,7 @@ function validate(raw: Raw): Config {
 		},
 		outbox: { consumerGroup: attempt(() => str(raw, "outbox.consumer_group"), "") },
 		control: {
-			address: attempt(() => str(raw, "control.address"), ""),
+			address: controlAddress,
 			timeoutMs: attempt(() => duration(raw, "control.timeout", 1, 60_000), 5000),
 			identity: { mode: controlIdentityMode as "mtls" | "development", serverName: controlServerName },
 		},

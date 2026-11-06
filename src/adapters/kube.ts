@@ -2,9 +2,10 @@
 // anvilkit-parsing): Jobs and the per-launch stage Secret in one namespace
 // (never their Pods), through the least Role the Knowledge chart grants.
 // Every call is exactly one HTTPS request: no client retries, no redirects
-// followed, so a lost answer is resolved by reading the deterministic name
-// again, never by a blind second create. Deletion is bound to the observed
-// UID.
+// followed, so a lost answer is resolved through the deterministic name,
+// never by a blind second create: a Job is read again; the stage Secret,
+// which the launcher may create but never read (RB-A18), is created again
+// and AlreadyExists answers it. Deletion is bound to the observed UID.
 import { readFileSync } from "node:fs";
 import https from "node:https";
 import { parse as parseYaml } from "yaml";

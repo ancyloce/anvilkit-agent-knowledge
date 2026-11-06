@@ -59,8 +59,13 @@ interface Verified {
 	result: ParseResult;
 }
 
+/** The bound of the stage Secrets one process remembers as placed; past it the oldest goes. */
+const maxStagedSecrets = 4096;
+
 export class Ingest implements ResultRecords {
 	private indexable?: (c: db.PoolClient, r: Indexable) => Promise<number>;
+	/** The launches (launch key and Job UID) whose stage Secret this process created or found in place. */
+	private readonly stagedSecrets = new Set<string>();
 	/** The Index Builder's scheduling, run inside the transaction that accepts parsed chunks (P16). */
 	onIndexable(fn: (c: db.PoolClient, r: Indexable) => Promise<number>): void {
 		this.indexable = fn;
@@ -81,8 +86,9 @@ export class Ingest implements ResultRecords {
 		return `/apis/batch/v1/namespaces/${this.settings().namespace}/jobs${key ? `/${key}` : ""}`;
 	}
 
-	private secretPath(key = ""): string {
-		return `/api/v1/namespaces/${this.settings().namespace}/secrets${key ? `/${key}` : ""}`;
+	/** The Secrets collection: the launcher creates there and reads nothing (RB-A18). */
+	private secretPath(): string {
+		return `/api/v1/namespaces/${this.settings().namespace}/secrets`;
 	}
 
 	/** The claimant's current task, checked against the request; nothing is written here. */
@@ -335,7 +341,14 @@ export class Ingest implements ResultRecords {
 		}
 	}
 
-	/** The Job-owned Secret with the attempt's two presigned URLs; created once, never logged. */
+	/**
+	 * The Job-owned Secret with the attempt's two presigned URLs; never logged.
+	 * The launcher's Role creates Secrets and reads none (RB-A18), so the
+	 * Secret is created, never looked up: AlreadyExists (409) means this
+	 * launch's Secret is in place. A launch whose Secret this process has
+	 * placed is not created again on later polls; another replica, or this one
+	 * after a restart, creates once more and takes the 409.
+	 */
 	private async ensureStageSecret(
 		launch: idb.ParseLaunch,
 		input: IngestInput,
@@ -343,8 +356,9 @@ export class Ingest implements ResultRecords {
 		objects: ObjectStore,
 		jobUid: string,
 	): Promise<void> {
+		const staged = `${launch.launchKey}/${jobUid}`;
+		if (this.stagedSecrets.has(staged)) return;
 		const name = `${launch.launchKey}-stage`;
-		if (await kube.get(this.secretPath(name))) return;
 		const objectKey = await idb.revisionObject(
 			this.store.pool,
 			input.sourceId,
@@ -379,6 +393,11 @@ export class Ingest implements ResultRecords {
 		} catch (err) {
 			if (!(err instanceof KubeError && err.status === 409)) throw err;
 		}
+		if (this.stagedSecrets.size >= maxStagedSecrets) {
+			const oldest = this.stagedSecrets.values().next().value;
+			if (oldest !== undefined) this.stagedSecrets.delete(oldest);
+		}
+		this.stagedSecrets.add(staged);
 	}
 
 	/** Reads, validates and records the result bytes of a completed Job. */
