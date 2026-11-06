@@ -36,7 +36,7 @@ COPY forwarder/cmd ./cmd
 COPY forwarder/internal ./internal
 RUN go build -trimpath -ldflags="-s -w" -o /out/anvilkit-knowledge-forwarder ./cmd/anvilkit-knowledge-forwarder
 
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS forwarder
+FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a AS forwarder
 COPY --from=forwarder-build /out/anvilkit-knowledge-forwarder /usr/local/bin/anvilkit-knowledge-forwarder
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/anvilkit-knowledge-forwarder"]
