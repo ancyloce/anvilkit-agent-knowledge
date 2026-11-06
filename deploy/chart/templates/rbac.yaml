@@ -1,8 +1,10 @@
 {{- if .Values.parser.enabled }}
 # The Knowledge parser launcher's least privilege (DD-07 §2, SEC-09): in the
-# parser namespace only, create, read and delete Jobs and create and read
-# the per-launch stage Secret the Job owns. No pods, exec, list, watch,
-# patch or other resource; the admission policies of
+# parser namespace only, create, read and delete Jobs and create the
+# per-launch stage Secret the Job owns. It reads no Secret (RB-A18): the
+# per-launch names cannot be listed as resourceNames, so get would admit
+# every Secret of the namespace; AlreadyExists answers a repeated create.
+# No pods, exec, list, watch, patch or other resource; the admission policies of
 # deploy/policies/chart (templates/parsing-jobs.yaml) additionally binds every
 # Job to the fixed parser template.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -18,7 +20,7 @@ rules:
     verbs: ["create", "get", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create", "get"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

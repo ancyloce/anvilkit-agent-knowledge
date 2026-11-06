@@ -134,8 +134,11 @@ nats:
       forwarderKey: forwarder
       relayKey: relay
 
-# The Control placement of the original-dispatch query; optional. The client
-# presents the workload certificate and verifies Control by serverName.
+# The Control placement of the original-dispatch query and of the commercial
+# authorization of every disclosure; required outside development (RB-A04:
+# the chart and the loader refuse an unplaced Control unless
+# development.enabled). The client presents the workload certificate and
+# verifies Control by serverName.
 control:
   address: ""
   identity:
@@ -158,7 +161,8 @@ objects:
 # P23: the removal inventory in the independent DR store (its own bucket,
 # user and bucket-limited policy): the endpoint and an existing Secret
 # holding a KEY=VALUE file with the ACCESS_KEY_ID and SECRET_ACCESS_KEY
-# lines. Empty endpoint: deletions and revocations are not preserved across
+# lines. Required outside development (RB-A04); an empty endpoint, admitted
+# only with development.enabled, preserves no deletion or revocation across
 # a database restore (the service warns).
 removals:
   endpoint: ""
@@ -224,7 +228,8 @@ store:
 # delivery rows only) of the erasure of deleted sources and the retention of
 # delivery rows. Under secrets.provider csi: whether it is configured (its URL
 # is the cleanup-database-url key); under kubernetes cleanup.secret.name.
-# Without it nothing is erased or pruned (a warning at start).
+# Required outside development (RB-A04); without it, admitted only with
+# development.enabled, nothing is erased or pruned (a warning at start).
 cleanup:
   enabled: false
   secret:

@@ -126,6 +126,19 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if and (dig "retained" "url" "" .Values.inference) (not .Values.inference.url) }}
 {{- fail "inference.retained.url places the earlier model of an embedding-model change and needs inference.url" }}
 {{- end }}
+{{- /* RB-A04: outside development the placements that keep disclosure and
+deletion closed are required, as the loader requires them. */}}
+{{- if not .Values.development.enabled }}
+{{- if not .Values.control.address }}
+{{- fail "control.address is required outside development: without Control no disclosure is commercially authorized (an unplaced Control renders only with development.enabled: true)" }}
+{{- end }}
+{{- if not .Values.removals.endpoint }}
+{{- fail "removals.endpoint is required outside development: without the removal inventory deletions and revocations are not preserved across a database restore (an unplaced inventory renders only with development.enabled: true)" }}
+{{- end }}
+{{- if or (and $kube (not .Values.cleanup.secret.name)) (and (not $kube) (not .Values.cleanup.enabled)) }}
+{{- fail "the cleanup identity is required outside development (cleanup.secret.name under secrets.provider kubernetes, cleanup.enabled under csi): without it deleted sources are never erased (an unplaced cleanup identity renders only with development.enabled: true)" }}
+{{- end }}
+{{- end }}
 {{- end -}}
 
 {{/* The identity Secret: the rendered Certificate's or the environment's. */}}
