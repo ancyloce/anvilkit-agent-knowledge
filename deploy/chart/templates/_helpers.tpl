@@ -37,24 +37,30 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "anvilkit-agent-knowledge.image" -}}
 {{- if .Values.image.digest -}}
 {{- printf "%s@%s" .Values.image.repository .Values.image.digest -}}
-{{- else -}}
+{{- else if .Values.development.enabled -}}
 {{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) -}}
+{{- else -}}
+{{- fail "image.digest is required outside development: a tag is mutable and only a digest pins the image (RB-S10); the tag renders only with development.enabled: true" -}}
 {{- end -}}
 {{- end -}}
 
 {{- define "anvilkit-agent-knowledge.forwarderImage" -}}
 {{- if .Values.forwarder.image.digest -}}
 {{- printf "%s@%s" .Values.forwarder.image.repository .Values.forwarder.image.digest -}}
-{{- else -}}
+{{- else if .Values.development.enabled -}}
 {{- printf "%s:%s" .Values.forwarder.image.repository (default .Chart.AppVersion .Values.forwarder.image.tag) -}}
+{{- else -}}
+{{- fail "forwarder.image.digest is required outside development: a tag is mutable and only a digest pins the image (RB-S10); the tag renders only with development.enabled: true" -}}
 {{- end -}}
 {{- end -}}
 
 {{- define "anvilkit-agent-knowledge.relayImage" -}}
 {{- if .Values.relay.image.digest -}}
 {{- printf "%s@%s" .Values.relay.image.repository .Values.relay.image.digest -}}
-{{- else -}}
+{{- else if .Values.development.enabled -}}
 {{- printf "%s:%s" .Values.relay.image.repository (default .Chart.AppVersion .Values.relay.image.tag) -}}
+{{- else -}}
+{{- fail "relay.image.digest is required outside development: a tag is mutable and only a digest pins the image (RB-S10); the tag renders only with development.enabled: true" -}}
 {{- end -}}
 {{- end -}}
 

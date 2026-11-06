@@ -62,12 +62,14 @@ jobs:
     env:
       # A production-shaped render (development.enabled false). RB-A04: outside
       # development the chart requires the Control placement, the removal
-      # inventory and the cleanup identity.
+      # inventory and the cleanup identity; RB-S10: and every image's digest.
       CHART_SETS: >-
         --set database.secret.name=knowledge-database --set nats.url=tls://nats:4222 --set nats.tls.caSecret.name=nats-ca --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer
         --set forwarder.database.secret.name=knowledge-forwarder-database
         --set relay.database.secret.name=knowledge-relay-database --set relay.queue.secret.name=queue-valkey --set nats.credentials.secret.name=knowledge-nats
         --set control.address=anvilkit-agent-control:9101 --set removals.endpoint=https://dr.ci.example:9000 --set removals.credentials.secret.name=knowledge-removals --set cleanup.secret.name=knowledge-cleanup
+        --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001 --set forwarder.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000002
+        --set relay.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000003
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
@@ -90,3 +92,13 @@ jobs:
           role=$(helm template anvilkit-agent-knowledge deploy/chart $CHART_SETS --set parser.enabled=true --set parser.namespace=anvilkit-parsing -s templates/rbac.yaml)
           [ "$(echo "$role" | grep -c 'resources: \["secrets"\]')" = 1 ] || { echo "$role"; exit 1; }
           echo "$role" | grep -A1 'resources: \["secrets"\]' | grep -qx '    verbs: \["create"\]' || { echo "$role"; exit 1; }
+      - name: Refuse a tag-only image outside development (RB-S10)
+        run: |
+          for unset in image.digest forwarder.image.digest relay.image.digest; do
+            if out=$(helm template anvilkit-agent-knowledge deploy/chart $CHART_SETS --set "$unset=" 2>&1); then
+              echo "rendered a tag-only image outside development ($unset)"; exit 1
+            fi
+            echo "$out" | grep -q "$unset is required outside development" || { echo "$out"; exit 1; }
+          done
+          # The development guard keeps the tags (DEVELOPMENT_ONLY).
+          helm template anvilkit-agent-knowledge deploy/chart $CHART_SETS --set image.digest= --set forwarder.image.digest= --set relay.image.digest= --set development.enabled=true > /dev/null
