@@ -16,6 +16,19 @@ const base = {
 	ANVILKIT_KNOWLEDGE_DATABASE_URL: "postgres://u:p@db.anvilkit-data.svc:5432/anvilkit_knowledge?sslmode=verify-full",
 	...identity,
 };
+// RB-A04: outside development Knowledge starts only with its Control
+// placement, the removal inventory and the cleanup identity.
+const control = { ANVILKIT_KNOWLEDGE_CONTROL_ADDRESS: "anvilkit-agent-control.anvilkit-apps.svc:9101" };
+const removals = {
+	ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT: "https://dr.anvilkit-data.svc:9000",
+	ANVILKIT_KNOWLEDGE_REMOVALS_ACCESS_KEY_ID: "knowledge-removals",
+	ANVILKIT_KNOWLEDGE_REMOVALS_SECRET_ACCESS_KEY: "removals-secret",
+};
+const cleanup = {
+	ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL:
+		"postgres://cleanup:c@db.anvilkit-data.svc:5432/anvilkit_knowledge?sslmode=verify-full",
+};
+const placed = { ...base, ...control, ...removals, ...cleanup };
 
 function write(content: string): string {
 	const dir = mkdtempSync(path.join(tmpdir(), "knowledge-config-"));
@@ -26,7 +39,7 @@ function write(content: string): string {
 
 describe("configuration generations", () => {
 	it("defaults to an mTLS listener and refuses plaintext without the development guard (P0.1)", () => {
-		const g = loadFrom(write("{}\n"), base, 1);
+		const g = loadFrom(write("{}\n"), placed, 1);
 		expect(g.config.grpc.identity.mode).toBe("mtls");
 		expect(g.config.grpc.identity.trustDomain).toBe("anvilkit.local");
 		expect(g.config.control.identity).toEqual({ mode: "mtls", serverName: "anvilkit-agent-control" });
@@ -139,7 +152,7 @@ describe("configuration generations", () => {
 
 	it("places the retained Inference of an embedding-model change from the environment with its complete earlier space (P2.7)", () => {
 		const env = {
-			...base,
+			...placed,
 			ANVILKIT_KNOWLEDGE_INFERENCE_URL: "https://inference-next:8000",
 			ANVILKIT_KNOWLEDGE_INFERENCE_RETAINED_URL: "https://inference:8000",
 		};
@@ -198,6 +211,9 @@ describe("configuration generations", () => {
 			ANVILKIT_KNOWLEDGE_DATABASE_URL_FILE: secret,
 			ANVILKIT_KNOWLEDGE_APOLLO_SNAPSHOT_FILE: snapshot,
 			...identity,
+			...control,
+			...removals,
+			...cleanup,
 		};
 		const g1 = loadFrom(file, env, 1);
 		expect(g1.config.tasks.maxAttempts).toBe(5);
@@ -228,6 +244,8 @@ describe("configuration generations", () => {
 		const file = write("removals:\n  window_margin: 10m\n");
 		const env = {
 			...base,
+			...control,
+			...cleanup,
 			ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT: "https://dr:9000",
 			ANVILKIT_KNOWLEDGE_REMOVALS_CREDENTIALS_FILE: creds,
 		};
@@ -244,7 +262,9 @@ describe("configuration generations", () => {
 		const g2 = loadFrom(file, env, 2);
 		expect(g2.digest).toBe(g1.digest);
 		expect(g2.secretRevision).not.toBe(g1.secretRevision);
-		// Unplaced by default: memory serves without the preservation (the service warns).
+		// Unplaced in the development default: memory serves without the
+		// preservation (the service warns); outside development the loader
+		// refuses it (RB-A04).
 		expect(loadFrom(path.resolve("config.yaml"), base, 1).config.removals.endpoint).toBe("");
 	});
 
@@ -256,7 +276,7 @@ describe("configuration generations", () => {
 		writeFileSync(storeFile, "postgres://store:one@db:5432/anvilkit_knowledge?sslmode=verify-full\n");
 		const file = write("{}\n");
 		const env = {
-			...base,
+			...placed,
 			ANVILKIT_KNOWLEDGE_QDRANT_URL: "https://qdrant:6333",
 			ANVILKIT_KNOWLEDGE_QDRANT_API_KEY_FILE: keyFile,
 			ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL_FILE: storeFile,
@@ -357,7 +377,7 @@ describe("configuration generations", () => {
 		const secure = loadFrom(
 			write("{}\n"),
 			{
-				...base,
+				...placed,
 				ANVILKIT_KNOWLEDGE_STORE_DATABASE_URL: `${secretUrl}?sslmode=verify-full&sslrootcert=/etc/anvilkit/pg/ca.crt`,
 				ANVILKIT_KNOWLEDGE_OBJECTS_ENDPOINT: "https://minio:9000",
 				ANVILKIT_KNOWLEDGE_OBJECTS_ACCESS_KEY_ID: "a",
@@ -385,6 +405,52 @@ describe("configuration generations", () => {
 			1,
 		);
 		expect(dev.config.objects.endpoint).toBe("http://minio:9000");
+	});
+
+	it("refuses to start outside development without Control, the removal inventory or the cleanup identity (RB-A04)", () => {
+		const file = write("{}\n");
+		const { ANVILKIT_KNOWLEDGE_CONTROL_ADDRESS: _c, ...noControl } = placed;
+		const {
+			ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT: _r,
+			ANVILKIT_KNOWLEDGE_REMOVALS_ACCESS_KEY_ID: _i,
+			ANVILKIT_KNOWLEDGE_REMOVALS_SECRET_ACCESS_KEY: _s,
+			...noRemovals
+		} = placed;
+		const { ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL: _u, ...noCleanup } = placed;
+		const cases: [NodeJS.ProcessEnv, RegExp][] = [
+			[noControl, /control.address is required outside development/],
+			[noRemovals, /removals.endpoint is required outside development/],
+			[noCleanup, /cleanup.url is required outside development/],
+		];
+		for (const [env, want] of cases) {
+			let message = "";
+			try {
+				loadFrom(file, env, 1);
+			} catch (err) {
+				message = (err as Error).message;
+			}
+			expect(message).toMatch(want);
+			// Only the missing placement is named, and no placed secret is echoed.
+			expect(message.match(/is required outside development/g)).toHaveLength(1);
+			expect(message).not.toContain("cleanup:c@");
+			expect(message).not.toContain("removals-secret");
+		}
+		// All three placed: each one is wired.
+		const g = loadFrom(file, placed, 1);
+		expect(g.config.control.address).toBe(control.ANVILKIT_KNOWLEDGE_CONTROL_ADDRESS);
+		expect(g.config.removals.endpoint).toBe(removals.ANVILKIT_KNOWLEDGE_REMOVALS_ENDPOINT);
+		expect(g.config.cleanup.url).toBe(cleanup.ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL);
+		// A mounted cleanup URL file places the cleanup identity too.
+		const dir = mkdtempSync(path.join(tmpdir(), "knowledge-config-"));
+		const cleanupFile = path.join(dir, "cleanup-url");
+		writeFileSync(cleanupFile, `${cleanup.ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL}\n`);
+		const mounted = loadFrom(file, { ...noCleanup, ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL_FILE: cleanupFile }, 1);
+		expect(mounted.config.cleanup.url).toBe(cleanup.ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL);
+		// The guard keeps the unplaced development foundation (DEVELOPMENT_ONLY).
+		const dev = loadFrom(write("development:\n  enabled: true\n"), base, 1);
+		expect(dev.config.control.address).toBe("");
+		expect(dev.config.removals.endpoint).toBe("");
+		expect(dev.config.cleanup.url).toBe("");
 	});
 
 	it("resolves the Store migration URL from exactly one source and refuses an unverified URL unless admitted (P0.6)", () => {
@@ -471,7 +537,7 @@ describe("cleanup identity rotation", () => {
 		const cleanupFile = path.join(dir, "cleanup-url");
 		writeFileSync(cleanupFile, "postgres://cleanup:one@db:5432/anvilkit_knowledge?sslmode=verify-full\n");
 		const file = write("{}\n");
-		const env = { ...base, ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL_FILE: cleanupFile };
+		const env = { ...base, ...control, ...removals, ANVILKIT_KNOWLEDGE_CLEANUP_DATABASE_URL_FILE: cleanupFile };
 		const g1 = loadFrom(file, env, 1);
 		expect(g1.config.cleanup.url).toBe("postgres://cleanup:one@db:5432/anvilkit_knowledge?sslmode=verify-full");
 		writeFileSync(cleanupFile, "postgres://cleanup:two@db:5432/anvilkit_knowledge?sslmode=verify-full\n");

@@ -22,6 +22,7 @@ type Doc = any;
 class FakeKube implements Kube {
 	objects = new Map<string, Record<string, unknown>>();
 	creates: { path: string; body: Record<string, unknown> }[] = [];
+	gets: string[] = [];
 	deletes: string[] = [];
 	failNextCreate: "network" | "lost" | "forbidden" | undefined;
 	private uid = 0;
@@ -47,6 +48,7 @@ class FakeKube implements Kube {
 		return b;
 	}
 	async get(path: string): Promise<Record<string, unknown> | undefined> {
+		this.gets.push(path);
 		return this.objects.get(path);
 	}
 	async delete(path: string, uid: string): Promise<"deleted" | "gone"> {
@@ -78,6 +80,7 @@ let tasks: Tasks;
 let store: Store;
 let sources: Sources;
 let ingest: Ingest;
+let metrics: Metrics;
 let seq = 0;
 
 const sha = (s: string) => `sha256:${createHash("sha256").update(s).digest("hex")}`;
@@ -159,7 +162,7 @@ async function codeOf(p: Promise<unknown>): Promise<string> {
 beforeAll(async () => {
 	inst = await startInstance();
 	({ tasks, store } = newTasks(inst, clock, new FakeDispatch()));
-	const metrics = new Metrics(new (await import("prom-client")).Registry());
+	metrics = new Metrics(new (await import("prom-client")).Registry());
 	sources = new Sources(
 		store,
 		tasks,
@@ -169,7 +172,13 @@ beforeAll(async () => {
 		clock,
 		silentLogger,
 	);
-	ingest = new Ingest(
+	ingest = newIngest();
+	tasks.setRecords("knowledge-ingest", ingest);
+});
+
+/** A launcher process over the shared store, API double and object store. */
+function newIngest(): Ingest {
+	return new Ingest(
 		store,
 		() => kube,
 		() => objects,
@@ -188,8 +197,7 @@ beforeAll(async () => {
 		silentLogger,
 		metrics,
 	);
-	tasks.setRecords("knowledge-ingest", ingest);
-});
+}
 
 afterAll(async () => {
 	await store.pool.end();
@@ -547,5 +555,35 @@ describe("review repairs", () => {
 		expect(byTask[canceled.taskId]).toBe("failed/SUPERSEDED");
 		expect(byTask[overdue.taskId]).toBe("failed/DEADLINE_EXCEEDED");
 		expect(await ingest.reapOrphans(50)).toBe(0);
+	});
+});
+
+describe("launcher least privilege (RB-A18)", () => {
+	it("creates each stage Secret, reads none, and takes AlreadyExists from a second launcher process", async () => {
+		const { taskId, inputDigest } = await registered("# rbac\n\ncreate only\n");
+		await tasks.claim(taskId, 1, "w1", 600_000);
+		const key = launchKeyOf(taskId, 1, 1);
+		const secretPath = `/api/v1/namespaces/anvilkit-parsing/secrets/${key}-stage`;
+		const stageCreates = () =>
+			kube.creates.filter((c) => c.path.endsWith("/secrets") && (c.body as Doc).metadata.name === `${key}-stage`);
+		expect(await advance(taskId, "w1", inputDigest)).toMatchObject({ state: "running" });
+		expect(await advance(taskId, "w1", inputDigest)).toMatchObject({ state: "running" });
+		// Later polls of the same process do not create it again.
+		expect(stageCreates()).toHaveLength(1);
+		const placed = kube.objects.get(secretPath) as Doc;
+		expect(placed.metadata.ownerReferences[0]).toMatchObject({
+			kind: "Job",
+			name: key,
+			uid: kube.job(key).metadata.uid,
+		});
+		// Another replica, or this one after a restart, creates once more and
+		// takes AlreadyExists (409) as the Secret in place; the first one stays.
+		const replica = newIngest();
+		expect(await replica.advance(taskId, 1, "w1", inputDigest)).toMatchObject({ state: "running" });
+		expect(stageCreates()).toHaveLength(2);
+		expect(kube.objects.get(secretPath)).toBe(placed);
+		// No launch of this file read a Secret: the chart's Role grants create only.
+		expect(kube.gets.length).toBeGreaterThan(0);
+		expect(kube.gets.filter((p) => p.includes("/secrets"))).toEqual([]);
 	});
 });
