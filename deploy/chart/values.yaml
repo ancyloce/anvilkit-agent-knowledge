@@ -186,9 +186,10 @@ parser:
 # P15: the Inference placement (anvilkit-agent-inference); optional. tls is
 # its transport: tls verifies the server against caSecret (key ca.crt) by
 # serverName (the URL host by default), mtls also presents the workload
-# certificate, development is plaintext http:// (development.enabled).
-# Inference serves HTTPS with its own listener certificate (P0.6) and
-# authenticates no client.
+# certificate (identity.mode mtls), development is plaintext http://
+# (development.enabled). Inference serves HTTPS with its own listener
+# certificate (P0.6); under its tls.mode mtls it admits only the SPIFFE IDs
+# of its allowlist (RB-A17), so this side then needs mtls.
 inference:
   url: ""
   tls:
