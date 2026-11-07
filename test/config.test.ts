@@ -75,7 +75,18 @@ describe("configuration generations", () => {
 			[
 				"inference:\n  tls:\n    mode: mtls\n",
 				{ ...base, ANVILKIT_KNOWLEDGE_INFERENCE_URL: "https://inference:8000" },
-				/inference.tls.ca_file, cert_file and key_file are required/,
+				/inference.tls.ca_file is required under inference.tls.mode mtls/,
+			],
+			// RB-A17: a client pair is named whole, or the workload identity is presented.
+			[
+				"inference:\n  tls:\n    mode: mtls\n    ca_file: /ca.crt\n    cert_file: /client.crt\n",
+				{ ...base, ANVILKIT_KNOWLEDGE_INFERENCE_URL: "https://inference:8000" },
+				/inference.tls.cert_file and key_file are set together under inference.tls.mode mtls/,
+			],
+			[
+				"inference:\n  tls:\n    mode: mtls\n    ca_file: /ca.crt\n",
+				{ ...noCert, ANVILKIT_KNOWLEDGE_INFERENCE_URL: "https://inference:8000" },
+				/inference.tls.mode mtls presents the workload certificate and needs grpc.identity.cert_file/,
 			],
 			["grpc:\n  identity:\n    max_connection_age: 10s\n", base, /max_connection_age/],
 			["{}\n", { ...base, ANVILKIT_KNOWLEDGE_DEVELOPMENT_ENABLED: "true" }, /not allowed overrides/],
@@ -97,6 +108,20 @@ describe("configuration generations", () => {
 		);
 		expect(plainInference.config.inference.tls.mode).toBe("development");
 		expect(plainInference.config.grpc.identity.mode).toBe("mtls");
+		// RB-A17: the chart renders inference.tls.mode mtls with ca_file only;
+		// that loads outside development and presents the workload identity.
+		const mtlsInference = loadFrom(
+			write("inference:\n  tls:\n    mode: mtls\n    ca_file: /etc/anvilkit/inference-ca/ca.crt\n"),
+			{ ...placed, ANVILKIT_KNOWLEDGE_INFERENCE_URL: "https://anvilkit-agent-inference:9108" },
+			1,
+		);
+		expect(mtlsInference.config.development.enabled).toBe(false);
+		expect(mtlsInference.config.inference.tls).toMatchObject({
+			mode: "mtls",
+			caFile: "/etc/anvilkit/inference-ca/ca.crt",
+			certFile: "",
+			keyFile: "",
+		});
 	});
 
 	it("loads the reviewed file and never carries the secret in a digest", () => {

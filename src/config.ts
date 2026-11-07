@@ -894,8 +894,13 @@ function clientTls(raw: Raw, key: string, development: boolean, errors: string[]
 	} else if (mode === "tls") {
 		if (!t.caFile) errors.push(`${key}.ca_file is required under ${key}.mode tls`);
 	} else if (mode === "mtls") {
-		if (!t.caFile || !t.certFile || !t.keyFile)
-			errors.push(`${key}.ca_file, cert_file and key_file are required under ${key}.mode mtls`);
+		// RB-A17: without cert_file and key_file the workload identity is
+		// presented (the caller checks that its files are placed).
+		if (!t.caFile) errors.push(`${key}.ca_file is required under ${key}.mode mtls`);
+		if (Boolean(t.certFile) !== Boolean(t.keyFile))
+			errors.push(
+				`${key}.cert_file and key_file are set together under ${key}.mode mtls (neither presents the workload identity)`,
+			);
 	} else errors.push(`${key}.mode must be development, tls or mtls`);
 	return t;
 }
