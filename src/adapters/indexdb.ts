@@ -338,6 +338,33 @@ export interface Progress {
 	expectedPoints: number;
 }
 
+export interface IndexLag {
+	/** Eligible current revisions the generation has not accepted. */
+	revisions: number;
+	/** Seconds since the oldest of them was requested for ingestion; 0 when none. */
+	oldestSeconds: number;
+}
+
+/**
+ * RB-A25 (platform.md SLO row 5, index freshness): the eligible current
+ * revisions (live sources, parsed under the generation's chunker) that the
+ * generation has not accepted, and the age of the oldest since its ingest
+ * request. A quarantined entry is excluded: it has its own signal and no
+ * longer holds the index back.
+ */
+export async function indexLag(c: Queryable, g: IndexGeneration): Promise<IndexLag> {
+	const r = await c.query<{ n: string; oldest: number }>(
+		`SELECT count(*)::text AS n, COALESCE(EXTRACT(EPOCH FROM now() - min(i.created_at)), 0)::float8 AS oldest
+		 FROM ingest_requests i JOIN sources s ON s.source_id = i.source_id AND s.current_revision = i.source_revision
+		 WHERE NOT s.deleted AND i.state IN ('indexing', 'indexed') AND i.chunk_count IS NOT NULL
+		   AND i.chunker_profile = $2 AND i.chunker_revision = $3
+		   AND NOT EXISTS (SELECT 1 FROM index_entries e WHERE e.generation = $1 AND e.source_id = i.source_id
+		                   AND e.source_revision = i.source_revision AND e.state IN ('accepted', 'quarantined'))`,
+		[g.generation, g.chunkerProfile, g.chunkerRevision],
+	);
+	return { revisions: Number(r.rows[0]?.n ?? 0), oldestSeconds: Number(r.rows[0]?.oldest ?? 0) };
+}
+
 /** What a building generation still lacks, counted over eligible revisions only. */
 export async function progressOf(c: Queryable, g: IndexGeneration): Promise<Progress> {
 	const r = await c.query<{

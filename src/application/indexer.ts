@@ -582,6 +582,11 @@ export class Indexer implements ResultRecords {
 		}
 		if (accepted && this.clock.now().getTime() - this.lastCount >= (this.settings().countCheckIntervalMs ?? 600_000))
 			await this.checkCount(vectors, accepted);
+		if (accepted) {
+			const lag = await idx.indexLag(this.store.pool, accepted);
+			this.metrics.indexUnindexedRevisions.set(lag.revisions);
+			this.metrics.indexFreshnessSeconds.set(lag.oldestSeconds);
+		}
 		for (const s of ["building", "materialized", "accepted", "retired"] as const)
 			this.metrics.indexGeneration.set(
 				{ state: s },

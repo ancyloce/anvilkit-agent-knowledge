@@ -25,6 +25,8 @@ export class Metrics {
 	readonly sourceCommands: Counter<"command" | "outcome">;
 	readonly indexBatches: Counter<"outcome">;
 	readonly indexGeneration: Gauge<"state">;
+	readonly indexUnindexedRevisions: Gauge;
+	readonly indexFreshnessSeconds: Gauge;
 	/** P2.7: document points the accepted generation's ledger expects that its collection does not hold. */
 	readonly indexPointsMissing: Gauge;
 	readonly searches: Counter<"outcome">;
@@ -161,6 +163,17 @@ export class Metrics {
 			name: "anvilkit_knowledge_index_generation",
 			help: "Newest index generation number in each state (0 when none).",
 			labelNames: ["state"],
+			registers: r,
+		});
+		// RB-A25: index freshness (platform.md SLO row 5) of the accepted generation.
+		this.indexUnindexedRevisions = new Gauge({
+			name: "anvilkit_knowledge_index_unindexed_revisions",
+			help: "Eligible current revisions the accepted index generation has not indexed (quarantined ones excluded).",
+			registers: r,
+		});
+		this.indexFreshnessSeconds = new Gauge({
+			name: "anvilkit_knowledge_index_freshness_seconds",
+			help: "Seconds since the oldest revision the accepted generation has not indexed was requested for ingestion; 0 when none.",
 			registers: r,
 		});
 		this.searches = new Counter({
