@@ -22,7 +22,6 @@ export class Metrics {
 	readonly dispatchQueries: Counter<"answer">;
 	readonly parseLaunches: Counter<"outcome">;
 	readonly parseResults: Counter<"outcome">;
-	readonly sourceCommands: Counter<"command" | "outcome">;
 	readonly indexBatches: Counter<"outcome">;
 	readonly indexGeneration: Gauge<"state">;
 	readonly indexUnindexedRevisions: Gauge;
@@ -140,12 +139,6 @@ export class Metrics {
 			name: "anvilkit_knowledge_parse_results_total",
 			help: "Observed parser attempts by outcome (parsed, rejected, invalid, missing, job_failed, deadline).",
 			labelNames: ["outcome"],
-			registers: r,
-		});
-		this.sourceCommands = new Counter({
-			name: "anvilkit_knowledge_source_commands_total",
-			help: "Source Registry commands by command and outcome.",
-			labelNames: ["command", "outcome"],
 			registers: r,
 		});
 		this.indexBatches = new Counter({

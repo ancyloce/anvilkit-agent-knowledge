@@ -94,19 +94,33 @@ export function checkResultBound(maxResultBytes: number, parser: ParserProfile |
  * and rejects the generation.
  */
 export async function buildRuntime(gen: Generation, previous?: Runtime): Promise<Runtime> {
-	const c = gen.config;
 	// The identity watcher outlives generations: the files are placements
-	// and the listener holds the watcher, so a later generation reuses it.
+	// and the listener holds the watcher, so a later generation reuses it and
+	// retire() leaves it running; the process stops it at its final shutdown.
+	// A watcher this build creates belongs to no generation when the build
+	// fails, so the failure stops it.
 	let identity = previous?.identity;
-	const id = c.grpc.identity;
+	let created: IdentityWatcher | undefined;
+	const id = gen.config.grpc.identity;
 	if (!identity && id.certFile && id.keyFile && id.caFile) {
-		identity = new IdentityWatcher(
+		created = new IdentityWatcher(
 			{ certFile: id.certFile, keyFile: id.keyFile, caFile: id.caFile },
 			id.reloadIntervalMs,
 			{ warn: (msg, f) => console.error(JSON.stringify({ level: "warn", msg, ...f })) },
 		);
-		identity.start();
+		created.start();
+		identity = created;
 	}
+	try {
+		return await buildClients(gen, identity);
+	} catch (err) {
+		created?.stop();
+		throw err;
+	}
+}
+
+async function buildClients(gen: Generation, identity: IdentityWatcher | undefined): Promise<Runtime> {
+	const c = gen.config;
 	let parser: ParserProfile | undefined;
 	let kube: Kube | undefined;
 	try {

@@ -157,7 +157,6 @@ export class IdentityWatcher implements experimental.CertificateProvider {
 	private timer?: NodeJS.Timeout;
 	private readonly caListeners = new Set<experimental.CaCertificateUpdateListener>();
 	private readonly identityListeners = new Set<experimental.IdentityCertificateUpdateListener>();
-	private readonly changeListeners = new Set<(previous: Material, current: Material) => void>();
 	private rejected = 0;
 
 	constructor(
@@ -188,10 +187,6 @@ export class IdentityWatcher implements experimental.CertificateProvider {
 		this.timer = undefined;
 	}
 
-	onChange(fn: (previous: Material, current: Material) => void): void {
-		this.changeListeners.add(fn);
-	}
-
 	/** Checks the files once; returns whether a new material was published. */
 	reload(): boolean {
 		let candidate: Material;
@@ -213,11 +208,9 @@ export class IdentityWatcher implements experimental.CertificateProvider {
 			});
 			return false;
 		}
-		const previous = this.material;
 		this.material = candidate;
 		this.rejected = 0;
 		this.publish();
-		for (const fn of this.changeListeners) fn(previous, candidate);
 		return true;
 	}
 

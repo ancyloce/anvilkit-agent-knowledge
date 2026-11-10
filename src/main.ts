@@ -3,8 +3,9 @@
 // listener, the gRPC listener, the lease sweeper, the reconciler and the
 // generation watcher; a failed start unwinds what it created. SIGTERM
 // withdraws readiness and new admission, drains the server within its
-// bound (forced stop afterwards), stops the loops, records the drain and
-// drains the generation's pools last (retire), then the probe listener.
+// bound (forced stop afterwards), stops the loops, records the drain,
+// drains the generation's pools (retire), closes the Control clients and
+// stops the shared identity watcher, then closes the probe listener.
 import { type ChannelCredentials, type ChannelOptions, credentials } from "@grpc/grpc-js";
 import { collectDefaultMetrics, Registry } from "prom-client";
 import { ControlDisclosure, ControlDispatchQuery } from "./adapters/control.js";
@@ -415,6 +416,8 @@ export async function start(
 		health.close();
 		await retire(rt, cfg.reload.drainLimitMs, log);
 		if (dispatch instanceof ControlDispatchQuery) dispatch.close();
+		disclosure?.close();
+		identityWatcher?.stop();
 		throw err;
 	}
 	log.info("knowledge serving", {
@@ -445,8 +448,13 @@ export async function start(
 			await Promise.all([sweeping, watching, reconciling]).catch(() => undefined);
 			database.stop();
 			schema.stop();
+			// The shared watcher: the first generation's, or one a later
+			// generation created when the first had none.
+			const watchers = new Set([identityWatcher, gens.runtime()?.identity]);
 			const forcedDrain = await gens.shutdown(cfg.reload.drainLimitMs);
 			if (dispatch instanceof ControlDispatchQuery) dispatch.close();
+			disclosure?.close();
+			for (const w of watchers) w?.stop();
 			metrics.drainSeconds.set((Date.now() - begin) / 1000);
 			if (forcedServer || forcedDrain) metrics.forcedStop.set(1);
 			log.info("knowledge stopped", { drainSeconds: (Date.now() - begin) / 1000, forced: forcedServer || forcedDrain });
