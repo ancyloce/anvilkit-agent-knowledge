@@ -32,8 +32,6 @@ export interface StoredFact {
 export interface MemoryStorePort {
 	get(tenantId: string, factId: string): Promise<StoredFact | undefined>;
 	put(tenantId: string, value: StoredFact): Promise<void>;
-	/** One page of a tenant's items (the rebuild's reconciliation). */
-	list(tenantId: string, offset: number, limit: number): Promise<StoredFact[]>;
 	close(): Promise<void>;
 }
 
@@ -77,14 +75,6 @@ export class PostgresMemoryStore implements MemoryStorePort {
 			"put",
 			this.store.put(namespaceOf(tenantId), value.factId, value as unknown as Record<string, unknown>, false),
 		);
-	}
-
-	async list(tenantId: string, offset: number, limit: number): Promise<StoredFact[]> {
-		const items = await wrap("search", this.store.search(namespaceOf(tenantId), { limit, offset }));
-		return items.flatMap((i) => {
-			const v = parse(i.value);
-			return v ? [v] : [];
-		});
 	}
 
 	close(): Promise<void> {

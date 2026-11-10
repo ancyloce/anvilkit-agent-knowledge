@@ -187,47 +187,6 @@ export async function decisionByCommand(
 		: undefined;
 }
 
-/** The decision history of a fact, oldest first (audit and tests). */
-export async function decisionsOf(c: Queryable, factId: string): Promise<DecisionRow[]> {
-	const r = await c.query<{
-		decision_id: string;
-		fact_id: string;
-		tenant_id: string;
-		from_revision: string;
-		to_revision: string;
-		decision: DecisionRow["decision"];
-		decider: string;
-		authority: DecisionRow["authority"];
-		policy_revision: string | null;
-		reason_code: string | null;
-		source_refs: string[];
-		expires_at: Date | null;
-		command_id: string;
-		request_digest: string;
-	}>(
-		`SELECT decision_id, fact_id, tenant_id, from_revision::text AS from_revision, to_revision::text AS to_revision, decision,
-		   decider, authority, policy_revision, reason_code, source_refs, expires_at, command_id, request_digest
-		 FROM memory_decisions WHERE fact_id = $1 ORDER BY to_revision`,
-		[factId],
-	);
-	return r.rows.map((x) => ({
-		decisionId: x.decision_id,
-		factId: x.fact_id,
-		tenantId: x.tenant_id,
-		fromRevision: Number(x.from_revision),
-		toRevision: Number(x.to_revision),
-		decision: x.decision,
-		decider: x.decider,
-		authority: x.authority,
-		policyRevision: x.policy_revision ?? "",
-		reasonCode: x.reason_code ?? "",
-		sourceRefs: x.source_refs,
-		expiresAt: x.expires_at,
-		commandId: x.command_id,
-		requestDigest: x.request_digest,
-	}));
-}
-
 /** Whether an identity ever proposed on behalf of a model or a worker in the tenant. */
 export async function speaksForModel(c: Queryable, tenantId: string, actorId: string): Promise<boolean> {
 	const r = await c.query(
