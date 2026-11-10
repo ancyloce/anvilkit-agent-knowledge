@@ -52,7 +52,6 @@ describe("the memory Store's vendor migration", () => {
 		});
 		expect((await store.get("tenant:a.b", "mem-1"))?.revision).toBe(2);
 		expect(await store.get("other", "mem-1")).toBeUndefined();
-		expect((await store.list("tenant:a.b", 0, 10)).map((v) => v.factId)).toEqual(["mem-1"]);
 		expect(namespaceOf("tenant:a.b")[1]).toMatch(/^t[0-9a-f]{32}$/);
 		await store.close();
 		await expect(as(inst.storeUrl, 'CREATE TABLE "memory_store".forbidden (x int)')).rejects.toThrow();

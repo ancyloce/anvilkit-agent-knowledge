@@ -13,8 +13,8 @@ import { Registry } from "prom-client";
 import { newPool, Store } from "../src/adapters/postgres.js";
 import { type Clock, type DispatchQuery, Tasks } from "../src/application/tasks.js";
 import type { Bounds, DispatchOutcome } from "../src/domain/task.js";
-import { silentLogger } from "../src/log.js";
 import { Metrics } from "../src/metrics.js";
+import { silentLogger } from "./logger.js";
 
 export function migrationsDir(): string | undefined {
 	const env = process.env.ANVILKIT_KNOWLEDGE_MIGRATIONS_DIR;

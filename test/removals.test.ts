@@ -14,7 +14,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as mdb from "../src/adapters/memorydb.js";
 import * as db from "../src/adapters/postgres.js";
-import { MemoryRemovalInventory, RemovalListIncomplete } from "../src/adapters/removals.js";
+import { RemovalListIncomplete } from "../src/adapters/removals.js";
 import { Recall, type RecallRequest } from "../src/application/recall.js";
 import { Removals } from "../src/application/removals.js";
 import { collectionOf } from "../src/domain/index.js";
@@ -28,8 +28,9 @@ import {
 	restoredRemoval,
 } from "../src/domain/removal.js";
 import type { Command, Scope } from "../src/domain/source.js";
-import { silentLogger } from "../src/log.js";
-import { acceptGeneration, drainProjections, type Kit, startKit } from "./memorykit.js";
+import { MemoryRemovalInventory } from "./doubles.js";
+import { silentLogger } from "./logger.js";
+import { acceptGeneration, decisionsOf, drainProjections, type Kit, startKit } from "./memorykit.js";
 
 let k: Kit;
 let su: pg.Client;
@@ -392,7 +393,7 @@ describe("point-in-time restore of the database", () => {
 		expect(await code(k.memory.get(alice, a.factId))).toBe("NOT_FOUND");
 		const fa = await mdb.getFact(k.store.pool, a.factId);
 		expect(fa).toMatchObject({ deleted: true, content: "" });
-		const last = (await mdb.decisionsOf(k.store.pool, a.factId)).at(-1);
+		const last = (await decisionsOf(k.store.pool, a.factId)).at(-1);
 		expect(last).toMatchObject({ decision: "delete", decider: "alice", commandId: delA.commandId });
 		expect((await k.memory.delete(delA, alice, a.factId, 2)).existing).toBe(true);
 		// b: revoked; d: revoked although the restore erased its confirmation too.

@@ -4,15 +4,14 @@
 // Inference double of rag.ts, an accepted index generation of the reviewed
 // space, and a runner that claims, advances and submits memory-project
 // tasks exactly as the Background Worker does.
+import type pg from "pg";
 import { Registry } from "prom-client";
 import type { StartedTestContainer } from "testcontainers";
 import type { InferencePort, Placement } from "../src/adapters/inference.js";
 import * as mdb from "../src/adapters/memorydb.js";
 import { type MemoryStorePort, migrateStore, PostgresMemoryStore } from "../src/adapters/memorystore.js";
-import { MemoryObjects } from "../src/adapters/objects.js";
 import * as db from "../src/adapters/postgres.js";
 import type { QdrantIndex } from "../src/adapters/qdrant.js";
-import { MemoryRemovalInventory } from "../src/adapters/removals.js";
 import { Indexer } from "../src/application/indexer.js";
 import { Memory, type MemoryBounds } from "../src/application/memory.js";
 import { MemoryProjector, type ProjectionAnswer } from "../src/application/projection.js";
@@ -21,9 +20,10 @@ import type { Tasks } from "../src/application/tasks.js";
 import type { SpaceProfile } from "../src/domain/index.js";
 import type { Command, Scope } from "../src/domain/source.js";
 import { TaskError } from "../src/domain/task.js";
-import { silentLogger } from "../src/log.js";
 import { Metrics } from "../src/metrics.js";
+import { MemoryObjects, MemoryRemovalInventory } from "./doubles.js";
 import { FakeClock, FakeDispatch, type Instance, newTasks, startInstance } from "./harness.js";
+import { silentLogger } from "./logger.js";
 import { HashInference, qdrantIndex, space, startQdrant } from "./rag.js";
 
 export interface Kit {
@@ -232,3 +232,44 @@ export async function drainProjections(k: Kit): Promise<number> {
 }
 
 export const ledger = (k: Kit, factId: string) => mdb.projectionsOf(k.store.pool, factId);
+
+/** The decision history of a fact, oldest first. */
+export async function decisionsOf(c: pg.Pool, factId: string): Promise<mdb.DecisionRow[]> {
+	const r = await c.query<{
+		decision_id: string;
+		fact_id: string;
+		tenant_id: string;
+		from_revision: string;
+		to_revision: string;
+		decision: mdb.DecisionRow["decision"];
+		decider: string;
+		authority: mdb.DecisionRow["authority"];
+		policy_revision: string | null;
+		reason_code: string | null;
+		source_refs: string[];
+		expires_at: Date | null;
+		command_id: string;
+		request_digest: string;
+	}>(
+		`SELECT decision_id, fact_id, tenant_id, from_revision::text AS from_revision, to_revision::text AS to_revision, decision,
+		   decider, authority, policy_revision, reason_code, source_refs, expires_at, command_id, request_digest
+		 FROM memory_decisions WHERE fact_id = $1 ORDER BY to_revision`,
+		[factId],
+	);
+	return r.rows.map((x) => ({
+		decisionId: x.decision_id,
+		factId: x.fact_id,
+		tenantId: x.tenant_id,
+		fromRevision: Number(x.from_revision),
+		toRevision: Number(x.to_revision),
+		decision: x.decision,
+		decider: x.decider,
+		authority: x.authority,
+		policyRevision: x.policy_revision ?? "",
+		reasonCode: x.reason_code ?? "",
+		sourceRefs: x.source_refs,
+		expiresAt: x.expires_at,
+		commandId: x.command_id,
+		requestDigest: x.request_digest,
+	}));
+}

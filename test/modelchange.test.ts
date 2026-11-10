@@ -17,7 +17,7 @@ import { Snapshots } from "../src/application/snapshots.js";
 import { collectionOf, indexTaskIdOf, type SpaceProfile, vectorsFit } from "../src/domain/index.js";
 import type { RetrievalProfile } from "../src/domain/retrieval.js";
 import type { Scope } from "../src/domain/source.js";
-import { silentLogger } from "../src/log.js";
+import { silentLogger } from "./logger.js";
 import { acceptGeneration, drainProjections, type Kit, startKit } from "./memorykit.js";
 import { HashInference, indexSeeded, seedParsed, space } from "./rag.js";
 

@@ -2,14 +2,14 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
 import type { StartedTestContainer } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MemoryObjects } from "../src/adapters/objects.js";
 import type { Store } from "../src/adapters/postgres.js";
 import { type Point, type QdrantIndex, VectorUnavailable } from "../src/adapters/qdrant.js";
 import { type IndexAnswer, Indexer } from "../src/application/indexer.js";
 import type { Tasks } from "../src/application/tasks.js";
 import { collectionOf, IndexError, indexTaskIdOf, pointIdOf, sourceKeyOf } from "../src/domain/index.js";
-import { silentLogger } from "../src/log.js";
+import { MemoryObjects } from "./doubles.js";
 import { FakeClock, FakeDispatch, type Instance, newTasks, startInstance } from "./harness.js";
+import { silentLogger } from "./logger.js";
 import { apiKey, HashInference, qdrantIndex, seedParsed, space, startQdrant } from "./rag.js";
 
 /** The real adapter with scripted faults: a write that lands partly and is never answered. */

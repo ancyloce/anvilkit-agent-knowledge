@@ -12,7 +12,6 @@
 import { createHash } from "node:crypto";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { type Embedded, InferenceError, type InferencePort } from "../src/adapters/inference.js";
-import type { MemoryObjects } from "../src/adapters/objects.js";
 import type { Store } from "../src/adapters/postgres.js";
 import { QdrantIndex } from "../src/adapters/qdrant.js";
 import type { Indexer } from "../src/application/indexer.js";
@@ -21,6 +20,7 @@ import type { SpaceProfile } from "../src/domain/index.js";
 import { indexTaskIdOf } from "../src/domain/index.js";
 import { chunkIdOf } from "../src/domain/parse.js";
 import type { AccessEntry } from "../src/domain/source.js";
+import type { MemoryObjects } from "./doubles.js";
 import type { FakeClock, Instance } from "./harness.js";
 
 export const qdrantImage =

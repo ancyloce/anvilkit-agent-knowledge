@@ -6,16 +6,15 @@
 // revisions, commands and removal rows return to their state at T while
 // the inventory keeps its records.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MemoryObjects } from "../src/adapters/objects.js";
 import type { Store } from "../src/adapters/postgres.js";
-import { MemoryRemovalInventory } from "../src/adapters/removals.js";
 import { Removals } from "../src/application/removals.js";
 import { type IngestPlan, Sources } from "../src/application/sources.js";
 import type { Tasks } from "../src/application/tasks.js";
 import { type Command, type Scope, SourceError } from "../src/domain/source.js";
 import { digestOf } from "../src/domain/task.js";
-import { silentLogger } from "../src/log.js";
+import { MemoryObjects, MemoryRemovalInventory } from "./doubles.js";
 import { FakeClock, FakeDispatch, type Instance, newTasks, startInstance } from "./harness.js";
+import { silentLogger } from "./logger.js";
 
 const clock = new FakeClock(new Date("2026-10-13T12:00:00Z"));
 const objects = new MemoryObjects();

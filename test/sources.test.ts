@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MemoryObjects } from "../src/adapters/objects.js";
 import type { Store } from "../src/adapters/postgres.js";
 import { type IngestPlan, Sources } from "../src/application/sources.js";
 import type { Tasks } from "../src/application/tasks.js";
 import { type Command, parseIngestInput, type Scope, SourceError } from "../src/domain/source.js";
 import { digestOf } from "../src/domain/task.js";
-import { silentLogger } from "../src/log.js";
+import { MemoryObjects } from "./doubles.js";
 import { FakeClock, FakeDispatch, type Instance, newTasks, startInstance } from "./harness.js";
+import { silentLogger } from "./logger.js";
 
 let inst: Instance;
 let tasks: Tasks;

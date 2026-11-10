@@ -91,7 +91,6 @@ describe("memory projections", () => {
 		let hold = true;
 		const slow: MemoryStorePort = {
 			get: (t, id) => k.memoryStore.get(t, id),
-			list: (t, o, l) => k.memoryStore.list(t, o, l),
 			close: async () => undefined,
 			put: async (t, v: StoredFact) => {
 				if (hold && !v.tombstone) {

@@ -5,15 +5,15 @@
 // background.requested events) commit or roll back together.
 import { Registry } from "prom-client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MemoryObjects } from "../src/adapters/objects.js";
 import type { Store } from "../src/adapters/postgres.js";
 import { Memory, type Proposal } from "../src/application/memory.js";
 import type { Tasks } from "../src/application/tasks.js";
 import { MemoryError } from "../src/domain/memory.js";
 import type { Command, Scope } from "../src/domain/source.js";
-import { silentLogger } from "../src/log.js";
 import { Metrics } from "../src/metrics.js";
+import { MemoryObjects } from "./doubles.js";
 import { bounds, FakeClock, FakeDispatch, type Instance, newTasks, startInstance } from "./harness.js";
+import { silentLogger } from "./logger.js";
 import { seedParsed } from "./rag.js";
 
 const clock = new FakeClock(new Date("2026-09-29T12:00:00Z"));

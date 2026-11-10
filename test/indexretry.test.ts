@@ -3,13 +3,13 @@
 // again as a new task generation and then quarantined, and a quarantined
 // revision no longer holds a generation back.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MemoryObjects } from "../src/adapters/objects.js";
 import type { Store } from "../src/adapters/postgres.js";
 import { type IndexAnswer, Indexer, type IndexSettings } from "../src/application/indexer.js";
 import type { Tasks } from "../src/application/tasks.js";
 import { indexTaskIdOf, qualifies } from "../src/domain/index.js";
-import { silentLogger } from "../src/log.js";
+import { MemoryObjects } from "./doubles.js";
 import { FakeClock, FakeDispatch, type Instance, newTasks, startInstance } from "./harness.js";
+import { silentLogger } from "./logger.js";
 import { HashInference, qdrantIndex, seedParsed, space, startQdrant } from "./rag.js";
 
 /** A store whose next reads fail as an unanswered request would. */

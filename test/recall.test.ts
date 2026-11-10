@@ -11,7 +11,7 @@ import { Recall, type RecallRequest } from "../src/application/recall.js";
 import { MemoryError } from "../src/domain/memory.js";
 import type { RetrievalProfile } from "../src/domain/retrieval.js";
 import type { Scope } from "../src/domain/source.js";
-import { silentLogger } from "../src/log.js";
+import { silentLogger } from "./logger.js";
 import { acceptGeneration, drainProjections, type Kit, startKit } from "./memorykit.js";
 import { seedParsed } from "./rag.js";
 

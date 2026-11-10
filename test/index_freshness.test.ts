@@ -2,8 +2,8 @@
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as idx from "../src/adapters/indexdb.js";
-import { MemoryObjects } from "../src/adapters/objects.js";
 import { collectionOf } from "../src/domain/index.js";
+import { MemoryObjects } from "./doubles.js";
 import { type Instance, startInstance } from "./harness.js";
 import { seedParsed, space } from "./rag.js";
 

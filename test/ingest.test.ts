@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parserProfile } from "../src/adapters/jobcontract.js";
 import { type Kube, KubeError } from "../src/adapters/kube.js";
-import { MemoryObjects } from "../src/adapters/objects.js";
 import type { Store } from "../src/adapters/postgres.js";
 import { Ingest, type ParseAnswer, planOf } from "../src/application/ingest.js";
 import { Sources } from "../src/application/sources.js";
@@ -10,9 +9,10 @@ import type { Tasks } from "../src/application/tasks.js";
 import { launchKeyOf, ParseError, resultKeyOf } from "../src/domain/parse.js";
 import type { Scope } from "../src/domain/source.js";
 import { digestOf } from "../src/domain/task.js";
-import { silentLogger } from "../src/log.js";
 import { Metrics } from "../src/metrics.js";
+import { MemoryObjects } from "./doubles.js";
 import { FakeClock, FakeDispatch, type Instance, newTasks, startInstance } from "./harness.js";
+import { silentLogger } from "./logger.js";
 
 /** The fields of the stored objects these tests read (the double stores what the launcher sent). */
 // biome-ignore lint/suspicious/noExplicitAny: Kubernetes object documents are read field by field in assertions.

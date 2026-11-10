@@ -4,12 +4,12 @@
 import pg from "pg";
 import { Registry } from "prom-client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MemoryObjects } from "../src/adapters/objects.js";
 import { newPool, Store } from "../src/adapters/postgres.js";
 import { Cleanup, withLock } from "../src/application/cleanup.js";
-import { silentLogger } from "../src/log.js";
 import { Metrics } from "../src/metrics.js";
+import { MemoryObjects } from "./doubles.js";
 import { FakeClock, type Instance, startInstance } from "./harness.js";
+import { silentLogger } from "./logger.js";
 import { seedParsed } from "./rag.js";
 
 const clock = new FakeClock(new Date("2026-10-13T12:00:00Z"));

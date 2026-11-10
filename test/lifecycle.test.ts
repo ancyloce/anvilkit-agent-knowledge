@@ -14,10 +14,10 @@ import {
 import { type ServiceError, status } from "@grpc/grpc-js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { loadFrom } from "../src/config.js";
-import { silentLogger } from "../src/log.js";
 import { type Started, start } from "../src/main.js";
 import { clientCredentials, clientOptions, IdentityWatcher } from "../src/transport/identity.js";
 import { type Instance, startInstance } from "./harness.js";
+import { silentLogger } from "./logger.js";
 import { files, issue, mount, newCA, spiffe, tempDir } from "./pki.js";
 
 let inst: Instance;
