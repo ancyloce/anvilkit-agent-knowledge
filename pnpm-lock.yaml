@@ -114,8 +114,8 @@ importers:
   .:
     dependencies:
       '@anvilkit/generated-clients':
-        specifier: github:ancyloce/anvilkit-agent-contracts#cbb4ea5e295ed9082935febca04e93c45969f8c0&path:ts
-        version: https://codeload.github.com/ancyloce/anvilkit-agent-contracts/tar.gz/cbb4ea5e295ed9082935febca04e93c45969f8c0#path:ts
+        specifier: github:ancyloce/anvilkit-agent-contracts#6826e0fd16b36758c5e5a1f6271765c7134da9f9&path:ts
+        version: https://codeload.github.com/ancyloce/anvilkit-agent-contracts/tar.gz/6826e0fd16b36758c5e5a1f6271765c7134da9f9#path:ts
       '@aws-sdk/client-s3':
         specifier: 3.1134.0
         version: 3.1134.0
@@ -207,8 +207,8 @@ importers:
 
 packages:
 
-  '@anvilkit/generated-clients@https://codeload.github.com/ancyloce/anvilkit-agent-contracts/tar.gz/cbb4ea5e295ed9082935febca04e93c45969f8c0#path:ts':
-    resolution: {gitHosted: true, integrity: sha512-VHW9LA0jfybxrCkIx0s5nxjNqEmwxG8GMi4lU9WVScTomWxGTj+5qBbwp5o71GaccS+GjDkyC179I/qUc5yjMA==, path: ts, tarball: https://codeload.github.com/ancyloce/anvilkit-agent-contracts/tar.gz/cbb4ea5e295ed9082935febca04e93c45969f8c0}
+  '@anvilkit/generated-clients@https://codeload.github.com/ancyloce/anvilkit-agent-contracts/tar.gz/6826e0fd16b36758c5e5a1f6271765c7134da9f9#path:ts':
+    resolution: {gitHosted: true, integrity: sha512-HzB/hDTOd8bEzj+Ej0jdfNmsLErB8bVZDByNDsET7ifhoiTzRfZzxbNTC2TMrITaK3FIeuRXIpFd+eOl14SzMw==, path: ts, tarball: https://codeload.github.com/ancyloce/anvilkit-agent-contracts/tar.gz/6826e0fd16b36758c5e5a1f6271765c7134da9f9}
     version: 0.1.0
 
   '@aws-sdk/checksums@3.1001.1':
@@ -1760,7 +1760,7 @@ packages:
 
 snapshots:
 
-  '@anvilkit/generated-clients@https://codeload.github.com/ancyloce/anvilkit-agent-contracts/tar.gz/cbb4ea5e295ed9082935febca04e93c45969f8c0#path:ts':
+  '@anvilkit/generated-clients@https://codeload.github.com/ancyloce/anvilkit-agent-contracts/tar.gz/6826e0fd16b36758c5e5a1f6271765c7134da9f9#path:ts':
     dependencies:
       '@bufbuild/protobuf': 2.15.0
       '@bufbuild/protovalidate': 1.2.0(@bufbuild/protobuf@2.15.0)
